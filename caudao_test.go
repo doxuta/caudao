@@ -105,7 +105,7 @@ func TestMeterReaderPassthroughAndCounting(t *testing.T) {
 		got.InputTokens += u.InputTokens
 		got.OutputTokens += u.OutputTokens
 		return false, ""
-	})
+	}, nil)
 	out, err := io.ReadAll(mr)
 	if err != nil {
 		t.Fatal(err)
@@ -128,7 +128,7 @@ func TestMeterReaderTrips(t *testing.T) {
 	mr := newMeterReader(sseStream(in...), func(u Usage) (bool, string) {
 		calls++
 		return calls == 2, "test budget gone" // trip on the first delta
-	})
+	}, nil)
 	out, _ := io.ReadAll(mr)
 	s := string(out)
 	if !strings.Contains(s, "caudao_budget_exhausted") || !strings.Contains(s, "test budget gone") {
@@ -258,7 +258,7 @@ func BenchmarkMeterReaderPassthrough(b *testing.B) {
 	b.SetBytes(int64(len(payload)))
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
-		mr := newMeterReader(io.NopCloser(bytes.NewReader(payload)), func(Usage) (bool, string) { return false, "" })
+		mr := newMeterReader(io.NopCloser(bytes.NewReader(payload)), func(Usage) (bool, string) { return false, "" }, nil)
 		io.Copy(io.Discard, mr)
 	}
 }

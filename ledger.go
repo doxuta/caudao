@@ -16,6 +16,13 @@ type Ledger struct {
 	path string
 	now  func() time.Time // injectable for tests
 	data ledgerFile
+
+	// In-flight reservations. Without them the budget check is a
+	// time-of-check/time-of-use race: N concurrent requests all read the same
+	// committed total, all pass, and all spend. Reserving a pessimistic
+	// estimate up front bounds the overshoot to what is actually in flight.
+	reserved      map[string]float64
+	reservedTotal float64
 }
 
 type ledgerFile struct {
@@ -45,15 +52,21 @@ func OpenLedger(path string) (*Ledger, error) {
 	if l.data.Models == nil {
 		l.data.Models = map[string]ModelSpend{}
 	}
+	l.reserved = map[string]float64{}
 	return l, nil
 }
 
 func (l *Ledger) day() string { return l.now().Format("2006-01-02") }
 
-// rollover resets the totals when the local date changes. Caller holds mu.
+// rollover resets the totals when the local date moves FORWARD. Comparing
+// with != would let a backwards clock step — an NTP correction, a timezone
+// change, a VM restored from a snapshot — wipe the day's spend and refill the
+// budget, which is the one direction a budget must never move on its own.
 func (l *Ledger) rollover() {
-	if d := l.day(); l.data.Day != d {
+	if d := l.day(); d > l.data.Day {
 		l.data = ledgerFile{Day: d, Models: map[string]ModelSpend{}}
+		l.reserved = map[string]float64{}
+		l.reservedTotal = 0
 	}
 }
 
@@ -72,12 +85,49 @@ func (l *Ledger) Add(model string, u Usage, usd float64) (modelUSD, totalUSD flo
 	return s.USD, l.data.Total, l.persist()
 }
 
-// Spent returns today's spend for one model and overall.
+// Spent returns today's spend for one model and overall, INCLUDING money
+// reserved by requests still in flight. Enforcement must see committed plus
+// reserved, or concurrent requests each see a stale total.
 func (l *Ledger) Spent(model string) (modelUSD, totalUSD float64) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.rollover()
+	return l.data.Models[model].USD + l.reserved[model], l.data.Total + l.reservedTotal
+}
+
+// Committed returns today's settled spend, excluding reservations. This is
+// what the status endpoint and the ledger file report.
+func (l *Ledger) Committed(model string) (modelUSD, totalUSD float64) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.rollover()
 	return l.data.Models[model].USD, l.data.Total
+}
+
+// Reserve holds estUSD against model's budget for a request about to be
+// forwarded, so a concurrent request cannot spend the same headroom. The
+// returned release must be called exactly once when the response finishes;
+// after that only the amounts passed to Add count.
+func (l *Ledger) Reserve(model string, estUSD float64) (release func()) {
+	l.mu.Lock()
+	l.rollover()
+	l.reserved[model] += estUSD
+	l.reservedTotal += estUSD
+	l.mu.Unlock()
+
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			l.mu.Lock()
+			defer l.mu.Unlock()
+			if l.reserved[model] -= estUSD; l.reserved[model] <= 0 {
+				delete(l.reserved, model)
+			}
+			if l.reservedTotal -= estUSD; l.reservedTotal < 0 {
+				l.reservedTotal = 0
+			}
+		})
+	}
 }
 
 // Snapshot returns a copy of today's ledger for status endpoints.

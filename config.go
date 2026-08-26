@@ -3,6 +3,7 @@ package caudao
 import (
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
 )
 
@@ -44,13 +45,48 @@ func (c *Config) Validate() error {
 	if c.Upstream == "" {
 		c.Upstream = "https://api.anthropic.com"
 	}
+	if _, err := parseUpstream(c.Upstream); err != nil {
+		return err
+	}
 	if c.DailyTotalUSD <= 0 {
 		return fmt.Errorf("caudao: daily_total_usd must be > 0 (fail-closed: no budget, no requests)")
 	}
 	if len(c.Prices) == 0 {
 		return fmt.Errorf("caudao: prices table is empty (fail-closed: unpriced models are refused)")
 	}
+	// A zero rate is not a price, it is a free pass: Cost() would return $0,
+	// the ledger would record $0, and the breaker could never trip. Refuse it
+	// as loudly as an empty table.
+	for _, prefix := range c.Prices.Prefixes() {
+		p := c.Prices[prefix]
+		if p.InputPerMTok <= 0 || p.OutputPerMTok <= 0 {
+			return fmt.Errorf("caudao: price entry %q has a non-positive rate "+
+				"(input %g, output %g) — a $0 price can never trip the breaker (fail-closed)",
+				prefix, p.InputPerMTok, p.OutputPerMTok)
+		}
+		if p.CacheWriteMult < 0 || p.CacheReadMult < 0 {
+			return fmt.Errorf("caudao: price entry %q has a negative cache multiplier (fail-closed)", prefix)
+		}
+	}
 	return nil
+}
+
+// parseUpstream parses the upstream origin and rejects the spellings url.Parse
+// accepts but no client can dial: "api.anthropic.com" (no scheme, no host),
+// "localhost:8484" (scheme "localhost"). caudao fails at startup, not at the
+// first request.
+func parseUpstream(raw string) (*url.URL, error) {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return nil, fmt.Errorf("caudao: bad upstream %q: %w", raw, err)
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return nil, fmt.Errorf("caudao: upstream %q needs an http:// or https:// scheme (fail-closed)", raw)
+	}
+	if u.Host == "" {
+		return nil, fmt.Errorf("caudao: upstream %q has no host (fail-closed)", raw)
+	}
+	return u, nil
 }
 
 // ModelBudget returns the daily ceiling for a model: the per-model ceiling if

@@ -34,6 +34,19 @@ they flow. Design constraints:
 Non-streaming responses are small; they are read fully, accounted, and passed
 through — post-hoc accounting there means the *next* request is blocked.
 
+## Reservations
+
+The budget check and the spend it authorises are not atomic: without help, N
+concurrent requests all read the same committed total, all pass, and all
+spend. Measured overshoot before the fix was 48x on a $0.10 cap with 24
+streams.
+
+Each forwarded request therefore holds a modest reservation, released the
+moment its first real usage event lands — the reservation only has to cover
+the window between forwarding and first usage, after which committed spend
+does the work. A request is never tripped by its own reservation, only by
+committed spend and by what other requests are holding.
+
 ## Ledger
 
 A mutex-guarded in-memory day record persisted with write-to-temp + atomic

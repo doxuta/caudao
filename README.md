@@ -35,11 +35,18 @@ and enforces the budget on the live token stream:
 - **Metered mid-stream** — usage is parsed from the SSE events as they flow
   (`message_start` for input + cache tokens, `message_delta` for output), so
   the breaker trips *during* a runaway response, not after it.
-- **Fail-closed** — a model with no configured price is refused; a POST to an
-  endpoint caudao doesn't meter is refused; no budget, no requests. New
-  billable endpoints can't sneak past the meter.
-- **Durable ledger** — daily spend survives restarts (atomic JSON writes);
-  a tripped breaker stays open until local midnight.
+- **Fail-closed** — a model with no configured price is refused; a $0 price is
+  refused at startup; a POST to an endpoint caudao doesn't meter is refused; and a
+  reply caudao cannot read (compressed, or not JSON on a metered endpoint) is
+  answered with 502 rather than forwarded unmetered. Upstream is asked for
+  `Accept-Encoding: identity` so the meter can always see the stream.
+- **Durable ledger** — daily spend survives restarts (atomic JSON writes); a
+  tripped breaker stays open until local midnight, and the day only ever rolls
+  FORWARD, so a backwards clock step cannot refill the budget.
+- **Reserved, not raced** — each in-flight request holds a small reservation
+  against its budget, so concurrent streams cannot all pass the same check and
+  spend the same headroom (before this, 24 concurrent streams overshot a $0.10
+  cap by 48x).
 - **Invisible otherwise** — bytes pass through unmodified (per-line, no
   response buffering, ~150 MB/s metering throughput); auth headers are never
   read, stored, or logged.

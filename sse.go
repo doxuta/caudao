@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"sync"
 )
 
 // meterReader wraps an SSE response body, passing every byte through
@@ -20,6 +21,10 @@ type meterReader struct {
 	closer  io.Closer
 	outbox  bytes.Buffer
 	onUsage func(delta Usage) (trip bool, reason string)
+	// onDone runs exactly once when the stream ends, however it ends: it
+	// releases this request's budget reservation.
+	onDone     func()
+	doneOnce   sync.Once
 	tripped    bool
 	tripReason string
 	done       bool
@@ -28,11 +33,12 @@ type meterReader struct {
 	inputCharged bool
 }
 
-func newMeterReader(body io.ReadCloser, onUsage func(Usage) (bool, string)) *meterReader {
+func newMeterReader(body io.ReadCloser, onUsage func(Usage) (bool, string), onDone func()) *meterReader {
 	return &meterReader{
 		src:     bufio.NewReaderSize(body, 32*1024),
 		closer:  body,
 		onUsage: onUsage,
+		onDone:  onDone,
 	}
 }
 
@@ -48,6 +54,7 @@ type sseEvent struct {
 func (m *meterReader) Read(p []byte) (int, error) {
 	for m.outbox.Len() == 0 {
 		if m.done {
+			m.finish()
 			return 0, io.EOF
 		}
 		line, err := m.src.ReadBytes('\n')
@@ -74,7 +81,18 @@ func (m *meterReader) Read(p []byte) (int, error) {
 	return m.outbox.Read(p)
 }
 
-func (m *meterReader) Close() error { return m.closer.Close() }
+func (m *meterReader) Close() error {
+	m.finish()
+	return m.closer.Close()
+}
+
+// finish runs the completion hook once, whether the stream ended cleanly, was
+// cut by the breaker, or the client hung up.
+func (m *meterReader) finish() {
+	if m.onDone != nil {
+		m.doneOnce.Do(m.onDone)
+	}
+}
 
 func (m *meterReader) inspect(line []byte) {
 	payload, ok := bytes.CutPrefix(bytes.TrimRight(line, "\r\n"), []byte("data: "))
