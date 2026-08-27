@@ -95,10 +95,15 @@ func (m *meterReader) finish() {
 }
 
 func (m *meterReader) inspect(line []byte) {
-	payload, ok := bytes.CutPrefix(bytes.TrimRight(line, "\r\n"), []byte("data: "))
+	payload, ok := bytes.CutPrefix(bytes.TrimRight(line, "\r\n"), []byte("data:"))
 	if !ok {
 		return
 	}
+	// The space after the colon is optional: the SSE grammar (WHATWG HTML
+	// 9.2.6) strips a single leading space if one is present, so "data:{...}"
+	// and "data: {...}" are the same event. Requiring the space meant a
+	// spec-valid stream parsed as nothing, cost nothing, and never tripped.
+	payload = bytes.TrimPrefix(payload, []byte(" "))
 	var ev sseEvent
 	if json.Unmarshal(payload, &ev) != nil {
 		return

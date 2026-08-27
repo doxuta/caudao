@@ -2,6 +2,7 @@ package caudao
 
 import (
 	"compress/gzip"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -188,5 +189,58 @@ func TestUpstreamMustBeDialable(t *testing.T) {
 	ok := &Config{Upstream: "https://gw.example.com/anthropic", DailyTotalUSD: 1, Prices: PriceTable{"m": {InputPerMTok: 1, OutputPerMTok: 1}}}
 	if err := ok.Validate(); err != nil {
 		t.Errorf("a valid upstream was refused: %v", err)
+	}
+}
+
+// The SSE meter used to require the exact prefix "data: " (with a space).
+// The space after the colon is optional in the Server-Sent Events grammar --
+// WHATWG HTML 9.2.6 strips a single leading space if present -- so an upstream
+// emitting "data:{...}" is spec-correct and semantically identical. caudao
+// parsed none of those lines, metered nothing, charged nothing, and the
+// breaker never moved: an unbounded stream at zero recorded cost, which is the
+// exact failure mode the tool exists to prevent.
+func TestSpaceLessDataPrefixIsStillMetered(t *testing.T) {
+	upstream := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fl, _ := w.(http.Flusher)
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		// No space after the colon -- valid SSE, and what several
+		// Anthropic-compatible gateways emit.
+		send := func(event, data string) {
+			fmt.Fprintf(w, "event: %s\ndata:%s\n\n", event, data)
+			if fl != nil {
+				fl.Flush()
+			}
+		}
+		send("message_start",
+			`{"type":"message_start","message":{"usage":{"input_tokens":2000,"output_tokens":1}}}`)
+		out := 1
+		for i := 0; i < 50; i++ {
+			select {
+			case <-r.Context().Done():
+				return
+			case <-time.After(time.Millisecond):
+			}
+			out += 1000
+			send("message_delta",
+				fmt.Sprintf(`{"type":"message_delta","usage":{"output_tokens":%d}}`, out))
+		}
+	})
+
+	px, ledger := startProxy(t, upstream, 0.05) // mock-model is $500/MTok output
+	resp, err := http.Post(px.URL+"/v1/messages", "application/json",
+		strings.NewReader(`{"model":"mock-model","stream":true,"messages":[]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+
+	if spent, _ := ledger.Committed("mock-model"); spent <= 0 {
+		t.Fatalf("a spec-valid \"data:{...}\" stream cost $%.6f -- it was forwarded unmetered", spent)
+	}
+	if !strings.Contains(string(body), "caudao_budget_exhausted") {
+		t.Fatalf("breaker never tripped on a spec-valid \"data:{...}\" stream:\n%s",
+			string(body)[:min(len(body), 600)])
 	}
 }
