@@ -244,3 +244,161 @@ func TestSpaceLessDataPrefixIsStillMetered(t *testing.T) {
 			string(body)[:min(len(body), 600)])
 	}
 }
+
+// An SSE event may carry its payload across several "data:" lines. WHATWG
+// HTML 9.2.6 concatenates the data fields of one event with "\n" and
+// dispatches at the blank line, so a pretty-printed JSON body split over five
+// lines is the same event as the one-line form -- any gateway that re-emits
+// with an indenting marshaller produces it. The meter unmarshalled each line
+// on its own, so every line failed to parse, no usage was ever seen, the
+// ledger stayed at zero and the breaker could not trip: the same fail-open as
+// the "data:" prefix bug, from the same wrong assumption that one line is one
+// event.
+func TestMultiLineDataEventIsStillMetered(t *testing.T) {
+	upstream := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fl, _ := w.(http.Flusher)
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		// Emit one event with its JSON spread over multiple data: lines.
+		sendSplit := func(event, data string) {
+			fmt.Fprintf(w, "event: %s\n", event)
+			for _, l := range strings.Split(data, "\n") {
+				fmt.Fprintf(w, "data: %s\n", l)
+			}
+			fmt.Fprint(w, "\n")
+			if fl != nil {
+				fl.Flush()
+			}
+		}
+		sendSplit("message_start", "{\n  \"type\": \"message_start\",\n  \"message\": {\n    \"usage\": {\n      \"input_tokens\": 2000,\n      \"output_tokens\": 1\n    }\n  }\n}")
+		out := 1
+		for i := 0; i < 50; i++ {
+			select {
+			case <-r.Context().Done():
+				return
+			case <-time.After(time.Millisecond):
+			}
+			out += 1000
+			sendSplit("message_delta",
+				fmt.Sprintf("{\n  \"type\": \"message_delta\",\n  \"usage\": {\n    \"output_tokens\": %d\n  }\n}", out))
+		}
+	})
+
+	px, ledger := startProxy(t, upstream, 0.05) // mock-model is $500/MTok output
+	resp, err := http.Post(px.URL+"/v1/messages", "application/json",
+		strings.NewReader(`{"model":"mock-model","stream":true,"messages":[]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+
+	if spent, _ := ledger.Committed("mock-model"); spent <= 0 {
+		t.Fatalf("a spec-valid multi-line \"data:\" stream cost $%.6f -- it was forwarded unmetered", spent)
+	}
+	if !strings.Contains(string(body), "caudao_budget_exhausted") {
+		t.Fatalf("breaker never tripped on a spec-valid multi-line \"data:\" stream:\n%s",
+			string(body)[:min(len(body), 600)])
+	}
+}
+
+// Reassembling multi-line events must not eat "data: [DONE]", the
+// OpenAI-compatible terminator. It is a single-line, legitimately non-JSON
+// payload: unparseable is the normal case for it, not a signal that more
+// lines are coming, and the client has to receive it byte for byte.
+func TestDoneSentinelIsForwardedVerbatim(t *testing.T) {
+	upstream := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fl, _ := w.(http.Flusher)
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":10,\"output_tokens\":1}}}\n\n")
+		fmt.Fprint(w, "data: [DONE]\n\n")
+		if fl != nil {
+			fl.Flush()
+		}
+	})
+
+	px, _ := startProxy(t, upstream, 100.0) // budget far above the spend: no trip
+	resp, err := http.Post(px.URL+"/v1/messages", "application/json",
+		strings.NewReader(`{"model":"mock-model","stream":true,"messages":[]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+
+	if !strings.Contains(string(body), "data: [DONE]") {
+		t.Fatalf("the [DONE] sentinel did not reach the client:\n%q", string(body))
+	}
+}
+
+// The meter's contract is that every byte upstream sends reaches the client
+// unmodified. Reassembly holds lines back until the event boundary, so an
+// off-by-one in the flush would drop or double a newline without changing
+// anything the other tests assert on.
+func TestMultiLineStreamIsForwardedByteExact(t *testing.T) {
+	const wire = "event: message_start\n" +
+		"data: {\n" +
+		"data:   \"type\": \"message_start\",\n" +
+		"data:   \"message\": {\"usage\": {\"input_tokens\": 10, \"output_tokens\": 1}}\n" +
+		"data: }\n" +
+		"\n" +
+		": a comment line, no data field at all\n" +
+		"\n" +
+		"event: message_delta\n" +
+		"data:{\"type\":\"message_delta\",\"usage\":{\"output_tokens\":2}}\n" +
+		"\n" +
+		"data: [DONE]\n" +
+		"\n"
+
+	upstream := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		io.WriteString(w, wire)
+	})
+
+	px, _ := startProxy(t, upstream, 100.0)
+	resp, err := http.Post(px.URL+"/v1/messages", "application/json",
+		strings.NewReader(`{"model":"mock-model","stream":true,"messages":[]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+
+	if string(body) != wire {
+		t.Fatalf("stream was not forwarded byte-exact\n got: %q\nwant: %q", string(body), wire)
+	}
+}
+
+// A stream whose final event never gets its terminating blank line -- upstream
+// closed the connection first -- must still be metered and still be forwarded.
+// Holding the last event for a boundary that never arrives would lose both.
+func TestUnterminatedFinalEventIsMeteredAndFlushed(t *testing.T) {
+	upstream := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		io.WriteString(w, "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":1000,\"output_tokens\":1}}}\n\n")
+		// No trailing blank line after this one.
+		io.WriteString(w, "event: message_delta\ndata: {\n")
+		io.WriteString(w, "data:  \"type\": \"message_delta\", \"usage\": {\"output_tokens\": 4000}\n")
+		io.WriteString(w, "data: }\n")
+	})
+
+	px, ledger := startProxy(t, upstream, 100.0)
+	resp, err := http.Post(px.URL+"/v1/messages", "application/json",
+		strings.NewReader(`{"model":"mock-model","stream":true,"messages":[]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+
+	if !strings.Contains(string(body), `"output_tokens": 4000`) {
+		t.Fatalf("the unterminated final event never reached the client:\n%q", string(body))
+	}
+	// 1000 input at $100/MTok = $0.10; 4000 output at $500/MTok = $2.00.
+	if _, total := ledger.Committed("mock-model"); total < 2.0 {
+		t.Fatalf("unterminated final event was not metered: total $%.6f, want >= $2.00", total)
+	}
+}

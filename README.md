@@ -47,8 +47,9 @@ and enforces the budget on the live token stream:
   against its budget, so concurrent streams cannot all pass the same check and
   spend the same headroom (before this, 24 concurrent streams overshot a $0.10
   cap by 48x).
-- **Invisible otherwise** — bytes pass through unmodified (per-line, no
-  response buffering, ~150 MB/s metering throughput); auth headers are never
+- **Invisible otherwise** — bytes pass through unmodified (no response
+  buffering: one line on the common path, one event while reassembling a
+  multi-line `data:` field, ~150 MB/s metering throughput); auth headers are never
   read, stored, or logged.
 
 ## Use

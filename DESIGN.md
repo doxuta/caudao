@@ -18,9 +18,16 @@ The interesting systems work is `meterReader` (sse.go): it wraps the upstream
 response body, passes every byte through unmodified, and parses SSE lines as
 they flow. Design constraints:
 
-- **No response buffering.** It holds at most one SSE line, so time-to-first-
-  token overhead is a line scan (~150 MB/s throughput measured; real LLM
-  streams are KB/s).
+- **No response buffering.** A data field that is valid JSON on its own is
+  metered and forwarded as its line is read, so the common case holds one SSE
+  line and time-to-first-token overhead is a line scan (~150 MB/s throughput
+  measured; real LLM streams are KB/s). A payload that does not parse alone
+  may be one field of a multi-line event — SSE joins an event's data fields
+  with `\n` and dispatches at the blank line — so those lines are held to the
+  boundary and the joined payload is parsed there. That path holds one event,
+  capped at 1 MiB, past which the block is released unmetered. Holding rather
+  than forwarding is deliberate: an event that trips the breaker must still be
+  droppable when its last line arrives.
 - **Incremental charging.** `message_start` charges input + cache tokens
   once; each `message_delta` carries a cumulative `output_tokens`, so the
   charge is the delta against the last seen value. Partial responses are
