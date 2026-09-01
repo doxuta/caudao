@@ -4,8 +4,8 @@
 Single Go binary, zero dependencies. Point `ANTHROPIC_BASE_URL` at it and an
 unattended overnight agent *physically cannot* burn $300.
 
-Named after the **cầu dao** — the household circuit breaker on every
-Vietnamese wall. When the load gets dangerous, it doesn't warn. It cuts.
+Named after the household circuit breaker: when the load gets dangerous, it
+doesn't warn. It cuts.
 
 ```
 $ caudao demo
@@ -97,14 +97,6 @@ agents' traffic (per-model cost caps, deploy locks, allowlists). That system
 is private; this is the part of it everyone running agents actually needs,
 rebuilt clean with tests: SSE metering verified byte-for-byte, breaker
 behavior tested mid-stream, ledger race-clean under `-race`.
-
-## Tiếng Việt
-
-Cầu dao chống cháy ví cho AI agent: proxy Go một binary, đo token ngay giữa
-SSE stream và ngắt kết nối đúng lúc ngân sách ngày cạn — agent chạy qua đêm
-không thể đốt quá số tiền bạn cho phép. Fail-closed: model không có giá thì
-từ chối, endpoint không đo được thì chặn. `caudao demo` xem cầu dao sập trong
-60 giây, không cần API key.
 
 MIT © Xuan Tai Doan — built with an AI coding agent under human review; see
 [DESIGN.md](DESIGN.md).

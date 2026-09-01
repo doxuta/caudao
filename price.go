@@ -1,8 +1,7 @@
 // Package caudao is a fail-closed spending circuit breaker for autonomous AI
 // agents: a reverse proxy in front of the Anthropic API that meters token
 // spend live from the response stream and cuts the connection the moment a
-// budget is exhausted — named after the cầu dao, the household circuit
-// breaker on every Vietnamese wall.
+// budget is exhausted — named after the household circuit breaker.
 //
 // Fail-closed means: when caudao cannot price a request (unknown model, no
 // budget configured), it refuses it rather than letting it through unmetered.
