@@ -70,7 +70,7 @@ func (m *meterReader) Read(p []byte) (int, error) {
 			m.finish()
 			return 0, io.EOF
 		}
-		line, err := m.src.ReadBytes('\n')
+		line, err := m.readLine()
 		if len(line) > 0 {
 			m.feed(line)
 		}
@@ -97,6 +97,54 @@ func (m *meterReader) Read(p []byte) (int, error) {
 		}
 	}
 	return m.outbox.Read(p)
+}
+
+// readLine returns one SSE line with its terminator attached, so the bytes can
+// still be forwarded unmodified. The SSE grammar (WHATWG HTML 9.2.6) ends a
+// line with CRLF, a lone LF, or a lone CR; splitting on LF alone left a
+// CR-terminated stream as one enormous "line" that parsed as nothing, cost
+// nothing, and was forwarded in full.
+func (m *meterReader) readLine() ([]byte, error) {
+	var line []byte
+	for {
+		if _, err := m.src.Peek(1); err != nil {
+			return line, err // nothing more is coming
+		}
+		buf, _ := m.src.Peek(m.src.Buffered()) // scan what has arrived
+		i := bytes.IndexByte(buf, '\n')
+		// A CR only ends this line if it comes before that LF; anything
+		// after it belongs to a later line.
+		win := buf
+		if i >= 0 {
+			win = buf[:i]
+		}
+		if j := bytes.IndexByte(win, '\r'); j >= 0 {
+			if j == len(buf)-1 {
+				// A CR ending the buffer may be half of a CRLF, and CRLF is
+				// ONE terminator; one more byte settles it. Only a
+				// CR-terminated stream ever waits for that byte, and only
+				// with the outbox empty, so nothing read is held back. If it
+				// never arrives (EOF, or a line that fills the buffer) the CR
+				// stands as the terminator, which is also spec-legal.
+				if more, err := m.src.Peek(len(buf) + 1); err == nil {
+					buf = more
+				}
+			}
+			i = j
+			if i+1 < len(buf) && buf[i+1] == '\n' {
+				i++ // CRLF: one line ending, not two lines
+			}
+		}
+		if i < 0 {
+			// No line ending in what has arrived yet: take it and read on.
+			line = append(line, buf...)
+			m.src.Discard(len(buf))
+			continue
+		}
+		line = append(line, buf[:i+1]...)
+		m.src.Discard(i + 1)
+		return line, nil
+	}
 }
 
 // maxEventBytes bounds reassembly. An Anthropic usage event is a few hundred

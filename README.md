@@ -12,13 +12,11 @@ $ caudao demo
 ⚡ caudao demo — daily budget: $0.05, mock model at $500/MTok output
 → an 'agent' starts an expensive streaming request through the breaker...
 
-  streaming...   5 deltas, spent $0.0185
-  streaming...  10 deltas, spent $0.0285
-  streaming...  15 deltas, spent $0.0435
+  streaming...   5 deltas, spent $0.0285
 
 💥 {"type":"error","error":{"type":"caudao_budget_exhausted","message":"caudao: daily budget for mock-model exhausted ($0.0535 of $0.05) — circuit opened mid-stream"}}
 
-⏱  stream cut after 19 deltas in 258ms — final spend $0.0535 (cap $0.05)
+⏱  stream cut after 9 deltas in 266ms — final spend $0.0535 (cap $0.05)
 → follow-up request while the breaker is open:
   HTTP 429 {"error":{"message":"caudao: daily budget for mock-model exhausted…"}}
 ```
@@ -38,8 +36,11 @@ and enforces the budget on the live token stream:
 - **Fail-closed** — a model with no configured price is refused; a $0 price is
   refused at startup; a POST to an endpoint caudao doesn't meter is refused; and a
   reply caudao cannot read (compressed, or not JSON on a metered endpoint) is
-  answered with 502 rather than forwarded unmetered. Upstream is asked for
-  `Accept-Encoding: identity` so the meter can always see the stream.
+  answered with 502 rather than forwarded unmetered — and charged a pessimistic
+  estimate anyway, because upstream already billed those tokens and a free
+  refusal would let a retrying agent loop forever with the ledger at zero.
+  Upstream is asked for `Accept-Encoding: identity` so the meter can always see
+  the stream.
 - **Durable ledger** — daily spend survives restarts (atomic JSON writes); a
   tripped breaker stays open until local midnight, and the day only ever rolls
   FORWARD, so a backwards clock step cannot refill the budget.

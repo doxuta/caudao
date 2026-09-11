@@ -169,7 +169,7 @@ func (p *Proxy) modifyResponse(resp *http.Response) error {
 	// refuse it rather than forwarding an unmetered response. Upstream was
 	// asked for identity, so a content-encoding here is a surprise.
 	if enc := resp.Header.Get("Content-Encoding"); enc != "" && enc != "identity" {
-		return unmeterable(resp, fmt.Sprintf("upstream replied with Content-Encoding %q, which caudao cannot meter", enc))
+		return p.unmeterable(resp, meta, fmt.Sprintf("upstream replied with Content-Encoding %q, which caudao cannot meter", enc))
 	}
 	ct := resp.Header.Get("Content-Type")
 	if strings.HasPrefix(ct, "text/event-stream") {
@@ -185,7 +185,7 @@ func (p *Proxy) modifyResponse(resp *http.Response) error {
 		return nil
 	}
 	if !strings.HasPrefix(ct, "application/json") {
-		return unmeterable(resp, fmt.Sprintf("upstream replied with Content-Type %q on a metered endpoint, which caudao cannot meter", ct))
+		return p.unmeterable(resp, meta, fmt.Sprintf("upstream replied with Content-Type %q on a metered endpoint, which caudao cannot meter", ct))
 	}
 	// Non-streaming: responses are small; read, account, pass through.
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 64<<20))
@@ -227,9 +227,16 @@ func (p *Proxy) status(w http.ResponseWriter) {
 // high charge closes the breaker early, a wrong zero charge disables it.
 var unmeteredEstimate = Usage{InputTokens: 50_000, OutputTokens: 10_000}
 
-// unmeterable replaces an unreadable body with an Anthropic-shaped error.
-// The upstream response is consumed and discarded: fail closed.
-func unmeterable(resp *http.Response, reason string) error {
+// unmeterable replaces an unreadable body with an Anthropic-shaped error and
+// charges the unmetered estimate. The upstream response is consumed and
+// discarded: fail closed. Refusing the client does not un-bill upstream —
+// the reply was billable, the tokens were generated — so charging nothing
+// here would leave the breaker parked at zero while a retrying agent spends
+// without limit, the "wrong zero charge" unmeteredEstimate warns about.
+func (p *Proxy) unmeterable(resp *http.Response, meta *reqMeta, reason string) error {
+	meta.free() // the estimate replaces the reservation
+	p.account(meta.model, unmeteredEstimate)
+	log.Printf("caudao: %s for %s — charging the unmetered estimate", reason, meta.model)
 	resp.Body.Close()
 	payload, _ := json.Marshal(map[string]any{
 		"type": "error",

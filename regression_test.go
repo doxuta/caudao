@@ -30,7 +30,7 @@ func TestCompressedResponseIsNotUnmetered(t *testing.T) {
 		defer gz.Close()
 		io.WriteString(gz, `{"id":"msg_1","usage":{"input_tokens":900000,"output_tokens":900000}}`)
 	})
-	px, _ := startProxy(t, upstream, 5.0)
+	px, ledger := startProxy(t, upstream, 5.0)
 
 	resp, err := http.Post(px.URL+"/v1/messages", "application/json",
 		strings.NewReader(`{"model":"claude-opus-5","messages":[]}`))
@@ -49,6 +49,12 @@ func TestCompressedResponseIsNotUnmetered(t *testing.T) {
 	if !strings.Contains(string(body), "caudao_unmeterable_response") {
 		t.Fatalf("no fail-closed error in body: %s", body)
 	}
+	// 502-ing the client does not un-bill upstream: those tokens were
+	// generated and charged. Refusing for free leaves the ledger at zero and
+	// the breaker pinned closed while a retrying agent loops forever.
+	if spent, _ := ledger.Committed("claude-opus-5"); spent <= 0 {
+		t.Fatalf("an unmeterable but already-billed reply cost $%.4f — that is a free pass", spent)
+	}
 }
 
 // A non-JSON reply on the metered endpoint is equally unreadable and must not
@@ -58,7 +64,7 @@ func TestUnreadableContentTypeIsRefused(t *testing.T) {
 		w.Header().Set("Content-Type", "application/octet-stream")
 		w.Write([]byte{0x00, 0x01, 0x02})
 	})
-	px, _ := startProxy(t, upstream, 5.0)
+	px, ledger := startProxy(t, upstream, 5.0)
 	resp, err := http.Post(px.URL+"/v1/messages", "application/json",
 		strings.NewReader(`{"model":"claude-opus-5","messages":[]}`))
 	if err != nil {
@@ -67,6 +73,50 @@ func TestUnreadableContentTypeIsRefused(t *testing.T) {
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusBadGateway {
 		t.Fatalf("binary reply returned %d, want 502", resp.StatusCode)
+	}
+	if spent, _ := ledger.Committed("claude-opus-5"); spent <= 0 {
+		t.Fatalf("an unreadable reply on the metered endpoint cost $%.4f — that is a free pass", spent)
+	}
+}
+
+// The Content-Encoding check sits above the text/event-stream branch, so a
+// gzipped stream takes the same refusal path. Refusing it for free let an
+// agent retry without limit at unbounded real cost: every attempt burns
+// upstream tokens, every attempt is 502'd, and the ledger never moves — the
+// "wrong zero charge disables it" case unmeteredEstimate's doc comment names.
+func TestGzippedStreamIsChargedAndOpensTheBreaker(t *testing.T) {
+	upstream := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Content-Encoding", "gzip")
+		gz := gzip.NewWriter(w)
+		defer gz.Close()
+		io.WriteString(gz, "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":900000,\"output_tokens\":900000}}}\n\n")
+	})
+	px, ledger := startProxy(t, upstream, 5.0) // claude-opus: $15/$75 per MTok
+
+	var sawRefusal bool
+	for i := 0; i < 20; i++ {
+		resp, err := http.Post(px.URL+"/v1/messages", "application/json",
+			strings.NewReader(`{"model":"claude-opus-5","stream":true,"messages":[]}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode == http.StatusTooManyRequests {
+			sawRefusal = true
+			break
+		}
+		if resp.StatusCode != http.StatusBadGateway {
+			t.Fatalf("request %d returned %d, want 502", i, resp.StatusCode)
+		}
+	}
+	spent, _ := ledger.Committed("claude-opus-5")
+	if spent <= 0 {
+		t.Fatalf("20 gzipped streams caudao could not meter cost $%.4f", spent)
+	}
+	if !sawRefusal {
+		t.Fatalf("the breaker never opened after 20 unmeterable replies ($%.4f of a $5.00 cap)", spent)
 	}
 }
 
@@ -299,6 +349,93 @@ func TestMultiLineDataEventIsStillMetered(t *testing.T) {
 	if !strings.Contains(string(body), "caudao_budget_exhausted") {
 		t.Fatalf("breaker never tripped on a spec-valid multi-line \"data:\" stream:\n%s",
 			string(body)[:min(len(body), 600)])
+	}
+}
+
+// WHATWG HTML 9.2.6, "Parsing an event stream": lines are separated by CRLF,
+// by a single LF, or by a single CR. The meter read lines with a plain
+// ReadBytes('\n'), so a CR-terminated stream — spec-legal, and what a gateway
+// re-emitting through a classic-Mac-style writer produces — arrived as one
+// enormous "line" that started with "event:" rather than "data:". It parsed as
+// nothing, cost nothing, and was forwarded in full: the same fail-open as the
+// "data:" prefix bug, from the same wrong assumption about line endings.
+func TestCROnlyStreamIsStillMetered(t *testing.T) {
+	upstream := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fl, _ := w.(http.Flusher)
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		// Lone CR line endings, including the blank line ending each event.
+		send := func(event, data string) {
+			fmt.Fprintf(w, "event: %s\rdata: %s\r\r", event, data)
+			if fl != nil {
+				fl.Flush()
+			}
+		}
+		send("message_start",
+			`{"type":"message_start","message":{"usage":{"input_tokens":2000,"output_tokens":1}}}`)
+		out := 1
+		for i := 0; i < 50; i++ {
+			select {
+			case <-r.Context().Done():
+				return
+			case <-time.After(time.Millisecond):
+			}
+			out += 1000
+			send("message_delta",
+				fmt.Sprintf(`{"type":"message_delta","usage":{"output_tokens":%d}}`, out))
+		}
+	})
+
+	px, ledger := startProxy(t, upstream, 0.05) // mock-model is $500/MTok output
+	resp, err := http.Post(px.URL+"/v1/messages", "application/json",
+		strings.NewReader(`{"model":"mock-model","stream":true,"messages":[]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+
+	if spent, _ := ledger.Committed("mock-model"); spent <= 0 {
+		t.Fatalf("a CR-terminated stream cost $%.6f -- it was forwarded unmetered", spent)
+	}
+	if !strings.Contains(string(body), "caudao_budget_exhausted") {
+		t.Fatalf("breaker never tripped on a CR-terminated stream:\n%s",
+			string(body)[:min(len(body), 600)])
+	}
+}
+
+// The control for the CR fix: a CRLF pair is ONE line ending, not a CR line
+// followed by an empty LF line. Getting that wrong would read a blank line
+// after every field, ending each event early — so this uses a multi-line
+// data event, which only reassembles if the CRLF pairs stay whole, and
+// checks the bytes reach the client untouched.
+func TestCRLFStreamIsStillMetered(t *testing.T) {
+	const wire = "event: message_start\r\n" +
+		"data: {\r\n" +
+		"data:   \"type\": \"message_start\",\r\n" +
+		"data:   \"message\": {\"usage\": {\"input_tokens\": 2000, \"output_tokens\": 1}}\r\n" +
+		"data: }\r\n" +
+		"\r\n"
+	upstream := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		io.WriteString(w, wire)
+	})
+
+	px, ledger := startProxy(t, upstream, 100.0) // no trip: budget far above spend
+	resp, err := http.Post(px.URL+"/v1/messages", "application/json",
+		strings.NewReader(`{"model":"mock-model","stream":true,"messages":[]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+
+	if spent, _ := ledger.Committed("mock-model"); spent <= 0 {
+		t.Fatalf("a CRLF-terminated multi-line event cost $%.6f -- it was forwarded unmetered", spent)
+	}
+	if string(body) != wire {
+		t.Fatalf("CRLF stream was not forwarded byte for byte:\n got %q\nwant %q", body, wire)
 	}
 }
 
