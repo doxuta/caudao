@@ -113,7 +113,7 @@ func demo() {
 	for sc.Scan() {
 		line := sc.Text()
 		switch {
-		case strings.Contains(line, "message_delta"):
+		case isDeltaEvent(line):
 			deltas++
 			if deltas%5 == 0 {
 				_, total := spend(ledger)
@@ -134,6 +134,14 @@ func demo() {
 	body, _ := io.ReadAll(resp2.Body)
 	resp2.Body.Close()
 	fmt.Printf("  HTTP %d %s\n", resp2.StatusCode, strings.TrimSpace(string(body)))
+}
+
+// isDeltaEvent reports whether a stream line is one message_delta event. Each
+// event arrives as two lines — "event: message_delta" and its "data:" line —
+// and both carry the name, so matching it anywhere in the line counted every
+// event twice. Counting the data lines counts events.
+func isDeltaEvent(line string) bool {
+	return strings.HasPrefix(line, "data:") && strings.Contains(line, "message_delta")
 }
 
 func spend(l *caudao.Ledger) (string, float64) {
