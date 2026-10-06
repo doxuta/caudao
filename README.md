@@ -80,6 +80,12 @@ suspicious of unknown models is caudao's):
 }
 ```
 
+`daily_per_model_usd` keys are model-name prefixes, and each prefix is one
+shared ceiling: with `"claude-opus": 15.0`, `claude-opus-4-1` and
+`claude-opus-4-5` together may spend $15, not $15 each. The longest matching
+prefix owns a model, so a narrower entry such as `"claude-opus-5": 5.0` is its
+own pool. Models matching no prefix are held only by `daily_total_usd`.
+
 Cache tokens are billed too (1.25× input for cache writes, 0.1× for reads,
 both overridable per model).
 

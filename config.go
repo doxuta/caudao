@@ -16,6 +16,7 @@ type Config struct {
 	// DailyTotalUSD is the hard ceiling across all models per local day.
 	DailyTotalUSD float64 `json:"daily_total_usd"`
 	// DailyPerModelUSD are per-model-prefix ceilings (longest prefix wins).
+	// Each prefix is one pool: every model it governs spends from one ceiling.
 	DailyPerModelUSD map[string]float64 `json:"daily_per_model_usd,omitempty"`
 	// Prices per model prefix. A request whose model matches no prefix is
 	// refused. Prices change — keep this table yours, not ours.
@@ -89,19 +90,20 @@ func parseUpstream(raw string) (*url.URL, error) {
 	return u, nil
 }
 
-// ModelBudget returns the daily ceiling for a model: the per-model ceiling if
-// one matches (longest prefix), else the daily total.
-func (c *Config) ModelBudget(model string) float64 {
-	best := ""
-	for prefix := range c.DailyPerModelUSD {
-		if len(prefix) > len(best) && hasPrefix(model, prefix) {
-			best = prefix
+// ModelScope resolves which per-model ceiling governs a model: the longest
+// matching daily_per_model_usd prefix, and that ceiling. A model with no
+// matching prefix returns ("", DailyTotalUSD). The prefix names a POOL: every
+// model whose own longest match is the same prefix spends from one ceiling.
+func (c *Config) ModelScope(model string) (prefix string, budget float64) {
+	for p := range c.DailyPerModelUSD {
+		if len(p) > len(prefix) && hasPrefix(model, p) {
+			prefix = p
 		}
 	}
-	if best != "" {
-		return c.DailyPerModelUSD[best]
+	if prefix != "" {
+		return prefix, c.DailyPerModelUSD[prefix]
 	}
-	return c.DailyTotalUSD
+	return "", c.DailyTotalUSD
 }
 
 func hasPrefix(s, p string) bool {

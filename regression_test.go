@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
@@ -537,5 +538,84 @@ func TestUnterminatedFinalEventIsMeteredAndFlushed(t *testing.T) {
 	// 1000 input at $100/MTok = $0.10; 4000 output at $500/MTok = $2.00.
 	if _, total := ledger.Committed("mock-model"); total < 2.0 {
 		t.Fatalf("unterminated final event was not metered: total $%.6f, want >= $2.00", total)
+	}
+}
+
+// daily_per_model_usd keys are model-name PREFIXES ("longest prefix wins"),
+// but enforcement compared one exact model name's spend against the ceiling.
+// The README's own example, {"claude-opus": 15.0}, therefore capped each of
+// claude-opus-4-1, claude-opus-4-5, ... at $15 separately: N model names under
+// one prefix could spend N times the configured ceiling.
+func TestPerModelCeilingPoolsEveryModelUnderThePrefix(t *testing.T) {
+	cfg := testConfig("http://127.0.0.1:1", 100)
+	cfg.DailyPerModelUSD = map[string]float64{"claude-opus": 1.0}
+	ledger := memLedger()
+	p, err := NewProxy(cfg, ledger)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ledger.Add("claude-opus-4-1", Usage{}, 0.60)
+	if over, reason := p.overBudget("claude-opus-4-5"); over {
+		t.Fatalf("$0.60 of a $1.00 claude-opus ceiling spent, but a sibling model was refused: %s", reason)
+	}
+	ledger.Add("claude-opus-4-5", Usage{}, 0.60) // $1.20 under "claude-opus" in total
+	for _, m := range []string{"claude-opus-4-1", "claude-opus-4-5", "claude-opus-5"} {
+		if over, _ := p.overBudget(m); !over {
+			t.Errorf("%s still allowed after $1.20 was spent under a $1.00 claude-opus ceiling", m)
+		}
+	}
+
+	// And over HTTP, where a client would actually see it.
+	srv := httptest.NewServer(p)
+	defer srv.Close()
+	resp, err := http.Post(srv.URL+"/v1/messages", "application/json", strings.NewReader(`{"model":"claude-opus-4-5","messages":[]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusTooManyRequests {
+		t.Errorf("sibling model over the pooled ceiling: HTTP %d, want 429", resp.StatusCode)
+	}
+
+	// A model outside the prefix keeps its own, larger, allowance.
+	if over, reason := p.overBudget("claude-haiku-4"); over {
+		t.Errorf("claude-haiku-4 refused by the claude-opus ceiling: %s", reason)
+	}
+}
+
+// The longest matching prefix owns a model, so a narrower ceiling is its own
+// pool and its spend does not count against the broader one.
+func TestLongestPrefixCeilingIsItsOwnPool(t *testing.T) {
+	cfg := testConfig("http://127.0.0.1:1", 100)
+	cfg.DailyPerModelUSD = map[string]float64{"claude-opus": 1.0, "claude-opus-5": 5.0}
+	ledger := memLedger()
+	p, _ := NewProxy(cfg, ledger)
+
+	ledger.Add("claude-opus-5-1", Usage{}, 3.0)
+	if over, reason := p.overBudget("claude-opus-5-2"); over {
+		t.Errorf("$3 of a $5 claude-opus-5 ceiling refused: %s", reason)
+	}
+	if over, reason := p.overBudget("claude-opus-4-1"); over {
+		t.Errorf("claude-opus-5 spend leaked into the broader claude-opus pool: %s", reason)
+	}
+	ledger.Add("claude-opus-5-2", Usage{}, 2.5)
+	if over, _ := p.overBudget("claude-opus-5-9"); !over {
+		t.Error("$5.50 spent under a $5 claude-opus-5 ceiling, still allowed")
+	}
+}
+
+// In-flight reservations count against the pooled ceiling too, or concurrent
+// requests on different model names under one prefix all see headroom.
+func TestReservationsCountAgainstThePooledCeiling(t *testing.T) {
+	cfg := testConfig("http://127.0.0.1:1", 100)
+	cfg.DailyPerModelUSD = map[string]float64{"claude-opus": 0.05}
+	ledger := memLedger()
+	p, _ := NewProxy(cfg, ledger)
+
+	release := ledger.Reserve("claude-opus-4-1", p.reservation("claude-opus-4-1")) // ~$0.0675
+	defer release()
+	if over, _ := p.overBudget("claude-opus-4-5"); !over {
+		t.Error("a sibling model's in-flight reservation did not count against the pooled ceiling")
 	}
 }

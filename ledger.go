@@ -95,6 +95,28 @@ func (l *Ledger) Spent(model string) (modelUSD, totalUSD float64) {
 	return l.data.Models[model].USD + l.reserved[model], l.data.Total + l.reservedTotal
 }
 
+// SpentWhere returns today's spend, settled plus in-flight reservations,
+// summed over every model for which match returns true. A per-model ceiling
+// is a prefix, so it must be checked against all the models under it, not
+// against one exact model name.
+func (l *Ledger) SpentWhere(match func(model string) bool) float64 {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.rollover()
+	var sum float64
+	for m, s := range l.data.Models {
+		if match(m) {
+			sum += s.USD
+		}
+	}
+	for m, r := range l.reserved {
+		if match(m) {
+			sum += r
+		}
+	}
+	return sum
+}
+
 // Committed returns today's settled spend, excluding reservations. This is
 // what the status endpoint and the ledger file report.
 func (l *Ledger) Committed(model string) (modelUSD, totalUSD float64) {

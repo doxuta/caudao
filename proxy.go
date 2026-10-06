@@ -136,13 +136,20 @@ func (p *Proxy) reservation(model string) float64 {
 // would refuse legitimate concurrent traffic on a small budget.
 var reservationUsage = Usage{InputTokens: 2_000, OutputTokens: 500}
 
-// overBudget reports whether the model or the day is out of budget.
+// overBudget reports whether the model's ceiling or the day is out of budget.
+// A per-model ceiling is a prefix pool: it is checked against the spend of
+// every model that the same prefix governs, not against this model alone.
 func (p *Proxy) overBudget(model string) (bool, string) {
-	modelSpent, totalSpent := p.ledger.Spent(model)
-	if budget := p.cfg.ModelBudget(model); modelSpent >= budget {
-		return true, fmt.Sprintf("daily budget for %s exhausted ($%.4f of $%.2f)", model, modelSpent, budget)
+	if scope, budget := p.cfg.ModelScope(model); scope != "" {
+		spent := p.ledger.SpentWhere(func(m string) bool {
+			s, _ := p.cfg.ModelScope(m)
+			return s == scope
+		})
+		if spent >= budget {
+			return true, fmt.Sprintf("daily budget for %s* exhausted ($%.4f of $%.2f)", scope, spent, budget)
+		}
 	}
-	if totalSpent >= p.cfg.DailyTotalUSD {
+	if _, totalSpent := p.ledger.Spent(model); totalSpent >= p.cfg.DailyTotalUSD {
 		return true, fmt.Sprintf("daily total budget exhausted ($%.4f of $%.2f)", totalSpent, p.cfg.DailyTotalUSD)
 	}
 	return false, ""
