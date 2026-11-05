@@ -4,16 +4,18 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 )
 
-// MockUpstream is a fake Anthropic /v1/messages endpoint that streams
-// synthetic SSE with realistic usage events, so the breaker can be
-// demonstrated and tested without an API key or a single real token.
+// MockUpstream is a fake Anthropic /v1/messages endpoint with the event order of
+// a real reply: usage in message_start, text deltas with none, and one
+// message_delta at the end. So the breaker can be demonstrated and tested without
+// an API key or a single real token.
 type MockUpstream struct {
 	InputTokens    int           // billed at message_start
-	Deltas         int           // number of message_delta events
-	TokensPerDelta int           // output tokens added per delta
+	Deltas         int           // number of content_block_delta events
+	TokensPerDelta int           // output tokens each delta is worth
 	Delay          time.Duration // pause between deltas
 }
 
@@ -48,6 +50,9 @@ func (m *MockUpstream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		`{"type":"message_start","message":{"id":"msg_mock","model":%q,"usage":{"input_tokens":%d,"output_tokens":1}}}`,
 		req.Model, m.InputTokens))
 
+	// Three bytes a token, about what English measures.
+	delta := fmt.Sprintf(`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":%q}}`,
+		strings.Repeat("x", 3*m.TokensPerDelta))
 	out := 1
 	for i := 0; i < m.Deltas; i++ {
 		select {
@@ -55,11 +60,10 @@ func (m *MockUpstream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return // client (or the breaker) hung up — stop burning
 		case <-time.After(m.Delay):
 		}
-		send("content_block_delta",
-			`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"mock tokens flowing... "}}`)
+		send("content_block_delta", delta)
 		out += m.TokensPerDelta
-		send("message_delta", fmt.Sprintf(
-			`{"type":"message_delta","delta":{"stop_reason":null},"usage":{"output_tokens":%d}}`, out))
 	}
+	send("message_delta", fmt.Sprintf(
+		`{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":%d}}`, out))
 	send("message_stop", `{"type":"message_stop"}`)
 }

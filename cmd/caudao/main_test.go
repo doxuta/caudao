@@ -12,14 +12,14 @@ import (
 	"github.com/doxuta/caudao"
 )
 
-// The demo counts the message_delta events it sees go past. An SSE event is
-// two lines here -- "event: message_delta" and its "data: {...}" line -- and
-// both contain the substring "message_delta", so a substring match anywhere in
+// The demo counts the content_block_delta events it sees go past. An SSE event is
+// two lines here -- "event: content_block_delta" and its "data: {...}" line -- and
+// both contain the substring, so a substring match anywhere in
 // the line counted every event twice and the demo reported roughly double the
 // number of deltas that actually streamed.
 func TestDemoCountsEventsNotLines(t *testing.T) {
 	// Same wiring and the same numbers as demo().
-	mock := &caudao.MockUpstream{InputTokens: 3000, Deltas: 500, TokensPerDelta: 10, Delay: 25 * time.Millisecond}
+	mock := &caudao.MockUpstream{InputTokens: 3000, Deltas: 500, TokensPerDelta: 4, Delay: 25 * time.Millisecond}
 	up := httptest.NewServer(mock)
 	defer up.Close()
 	cfg := &caudao.Config{
@@ -64,14 +64,14 @@ func TestDemoCountsEventsNotLines(t *testing.T) {
 		var ev struct {
 			Type string `json:"type"`
 		}
-		if json.Unmarshal([]byte(payload), &ev) == nil && ev.Type == "message_delta" {
+		if json.Unmarshal([]byte(payload), &ev) == nil && ev.Type == "content_block_delta" {
 			streamed++
 		}
 	}
 	if streamed == 0 {
-		t.Fatal("no message_delta events streamed at all")
+		t.Fatal("no content_block_delta events streamed at all")
 	}
 	if counted != streamed {
-		t.Fatalf("demo would report %d deltas but %d message_delta events streamed", counted, streamed)
+		t.Fatalf("demo would report %d deltas but %d content_block_delta events streamed", counted, streamed)
 	}
 }

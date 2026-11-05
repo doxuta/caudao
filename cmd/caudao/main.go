@@ -80,7 +80,7 @@ func main() {
 func demo() {
 	upLn, err := net.Listen("tcp", "127.0.0.1:0")
 	die(err)
-	mock := &caudao.MockUpstream{InputTokens: 3000, Deltas: 500, TokensPerDelta: 10, Delay: 25 * time.Millisecond}
+	mock := &caudao.MockUpstream{InputTokens: 3000, Deltas: 500, TokensPerDelta: 4, Delay: 25 * time.Millisecond}
 	go http.Serve(upLn, mock)
 
 	cfg := &caudao.Config{
@@ -116,7 +116,7 @@ func demo() {
 		case isDeltaEvent(line):
 			deltas++
 			if deltas%5 == 0 {
-				_, total := spend(ledger)
+				total := spend(ledger)
 				fmt.Printf("  streaming... %3d deltas, spent $%.4f\n", deltas, total)
 			}
 		case strings.Contains(line, "caudao_budget_exhausted"):
@@ -124,7 +124,7 @@ func demo() {
 			fmt.Println("💥 " + strings.TrimPrefix(line, "data: "))
 		}
 	}
-	_, total := spend(ledger)
+	total := spend(ledger)
 	fmt.Println()
 	fmt.Printf("⏱  stream cut after %d deltas in %s — final spend $%.4f (cap $0.05)\n", deltas, time.Since(start).Round(time.Millisecond), total)
 	fmt.Println("→ follow-up request while the breaker is open:")
@@ -136,17 +136,18 @@ func demo() {
 	fmt.Printf("  HTTP %d %s\n", resp2.StatusCode, strings.TrimSpace(string(body)))
 }
 
-// isDeltaEvent reports whether a stream line is one message_delta event. Each
-// event arrives as two lines — "event: message_delta" and its "data:" line —
-// and both carry the name, so matching it anywhere in the line counted every
-// event twice. Counting the data lines counts events.
+// isDeltaEvent reports whether a stream line is one content_block_delta event.
+// Each event arrives as two lines — "event: content_block_delta" and its "data:"
+// line — and both carry the name, so matching it anywhere in the line counted
+// every event twice. Counting the data lines counts events.
 func isDeltaEvent(line string) bool {
-	return strings.HasPrefix(line, "data:") && strings.Contains(line, "message_delta")
+	return strings.HasPrefix(line, "data:") && strings.Contains(line, "content_block_delta")
 }
 
-func spend(l *caudao.Ledger) (string, float64) {
-	day, _, total := l.Snapshot()
-	return day, total
+// spend includes what the running stream holds against the budget.
+func spend(l *caudao.Ledger) float64 {
+	_, total := l.Spent("mock-model")
+	return total
 }
 
 func usage() {

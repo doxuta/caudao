@@ -180,14 +180,42 @@ func (p *Proxy) modifyResponse(resp *http.Response) error {
 	}
 	ct := resp.Header.Get("Content-Type")
 	if strings.HasPrefix(ct, "text/event-stream") {
-		resp.Body = newMeterReader(resp.Body, func(u Usage) (bool, string) {
+		// The running estimate is held as a reservation, not spend, because
+		// reported usage replaces it. If none is reported (the breaker cut the
+		// stream, or the client hung up) it becomes spend: upstream billed those
+		// tokens, and a free cut would refill the budget for the next retry.
+		var drop func()
+		held := 0
+		release := func() {
+			if drop != nil {
+				drop()
+			}
+			drop, held = nil, 0
+		}
+		price, _ := p.cfg.Prices.Lookup(meta.model)
+		meter := newMeterReader(resp.Body, func(u Usage) (bool, string) {
 			// Real usage supersedes the estimate: release the reservation
 			// before accounting, so a request is never tripped by its own
 			// placeholder — only by committed spend and other requests'
 			// reservations.
 			meta.free()
+			release()
 			return p.account(meta.model, u)
-		}, meta.free)
+		}, func() {
+			meta.free()
+			if tokens := held; tokens > 0 {
+				release()
+				p.account(meta.model, Usage{OutputTokens: tokens})
+			}
+		})
+		meter.onEstimate = func(tokens int) (bool, string) {
+			meta.free()
+			release()
+			drop = p.ledger.Reserve(meta.model, price.Cost(Usage{OutputTokens: tokens}))
+			held = tokens
+			return p.overBudget(meta.model)
+		}
+		resp.Body = meter
 		resp.Header.Del("Content-Length")
 		return nil
 	}

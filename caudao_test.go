@@ -168,7 +168,7 @@ func TestBreakerTripsMidStream(t *testing.T) {
 	if !strings.Contains(s, "caudao_budget_exhausted") {
 		t.Fatalf("no breaker event in stream:\n%s", s[:min(len(s), 800)])
 	}
-	if strings.Count(s, "message_delta") >= mock.Deltas {
+	if strings.Count(s, "event: content_block_delta") >= mock.Deltas {
 		t.Fatal("stream was not cut early")
 	}
 	if _, total := ledger.Spent("mock-model"); total < 0.05 {

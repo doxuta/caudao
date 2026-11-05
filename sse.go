@@ -26,6 +26,9 @@ type meterReader struct {
 	closer  io.Closer
 	outbox  bytes.Buffer
 	onUsage func(delta Usage) (trip bool, reason string)
+	// onEstimate gets the output tokens this reply has streamed since usage was
+	// last reported, estimated from their bytes; nil skips the estimate.
+	onEstimate func(tokens int) (trip bool, reason string)
 	// pending holds the raw lines of an event being reassembled, and data
 	// holds its data fields joined with "\n". Both are empty on the fast
 	// path. Nothing in pending has reached the client yet, so an event that
@@ -44,6 +47,7 @@ type meterReader struct {
 
 	lastOutput   int
 	inputCharged bool
+	estBytes     int
 }
 
 func newMeterReader(body io.ReadCloser, onUsage func(Usage) (bool, string), onDone func()) *meterReader {
@@ -62,7 +66,19 @@ type sseEvent struct {
 		Usage Usage `json:"usage"`
 	} `json:"message"`
 	Usage Usage `json:"usage"`
+	Delta struct {
+		Text        string `json:"text"`
+		PartialJSON string `json:"partial_json"`
+		Thinking    string `json:"thinking"`
+	} `json:"delta"`
 }
+
+// bytesPerToken turns streamed bytes into an output-token estimate. Output usage
+// arrives once, in the message_delta after the last byte of the reply, so the
+// bytes are all there is to meter while it runs. Visible text measured 2.28 to
+// 3.19 bytes per token (Korean, Vietnamese, English), so 2 never under-counted;
+// it does over-count English about 1.6x, which can only cut a reply early.
+const bytesPerToken = 2
 
 func (m *meterReader) Read(p []byte) (int, error) {
 	for m.outbox.Len() == 0 {
@@ -262,6 +278,15 @@ func (m *meterReader) inspectPayload(payload []byte) {
 			m.inputCharged = true
 			m.lastOutput = u.OutputTokens
 		}
+	case "content_block_delta":
+		m.estBytes += len(ev.Delta.Text) + len(ev.Delta.PartialJSON) + len(ev.Delta.Thinking)
+		if m.onEstimate != nil && m.estBytes >= bytesPerToken {
+			if trip, reason := m.onEstimate(m.estBytes / bytesPerToken); trip {
+				m.tripped = true
+				m.tripReason = reason
+			}
+		}
+		return
 	case "message_delta":
 		if out := ev.Usage.OutputTokens; out > m.lastOutput {
 			delta = Usage{OutputTokens: out - m.lastOutput}
@@ -270,7 +295,10 @@ func (m *meterReader) inspectPayload(payload []byte) {
 	default:
 		return
 	}
-	if delta == (Usage{}) {
+	// Reported usage replaces the estimate, even when it adds nothing.
+	estimated := m.estBytes >= bytesPerToken
+	m.estBytes = 0
+	if delta == (Usage{}) && !estimated {
 		return
 	}
 	if trip, reason := m.onUsage(delta); trip {
