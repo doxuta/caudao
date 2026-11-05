@@ -12,13 +12,15 @@ $ caudao demo
 ⚡ caudao demo — daily budget: $0.05, mock model at $500/MTok output
 → an 'agent' starts an expensive streaming request through the breaker...
 
-  streaming...   5 deltas, spent $0.0285
+  streaming...   5 deltas, spent $0.0185
+  streaming...  10 deltas, spent $0.0335
+  streaming...  15 deltas, spent $0.0485
 
-💥 {"type":"error","error":{"type":"caudao_budget_exhausted","message":"caudao: daily budget for mock-model exhausted ($0.0535 of $0.05) — circuit opened mid-stream"}}
+💥 {"type":"error","error":{"type":"caudao_budget_exhausted","message":"caudao: daily total budget exhausted ($0.0515 of $0.05) — circuit opened mid-stream"}}
 
-⏱  stream cut after 9 deltas in 266ms — final spend $0.0535 (cap $0.05)
+⏱  stream cut after 15 deltas in 431ms — final spend $0.0515 (cap $0.05)
 → follow-up request while the breaker is open:
-  HTTP 429 {"error":{"message":"caudao: daily budget for mock-model exhausted…"}}
+  HTTP 429 {"error":{"message":"caudao: daily total budget exhausted ($0.0515 of $0.05) — request refused","type":"caudao_budget_exhausted"},"type":"error"}
 ```
 
 That demo needs **no API key** — a mock upstream ships in the binary.
@@ -30,9 +32,11 @@ into ten thousand Opus calls. Client-side budget flags only work if every
 client honors them; caudao sits **under** all of them, at the network layer,
 and enforces the budget on the live token stream:
 
-- **Metered mid-stream** — usage is parsed from the SSE events as they flow
-  (`message_start` for input + cache tokens, `message_delta` for output), so
-  the breaker trips *during* a runaway response, not after it.
+- **Metered mid-stream** — input and cache tokens come from `message_start`.
+  Output tokens are reported only by `message_delta`, which a real reply sends
+  once, after its last byte ([Proof](#proof)), so caudao estimates them from the
+  bytes of each content delta as it flows and trips on that. Reported usage
+  replaces the estimate when it arrives; a reply cut before then keeps it.
 - **Fail-closed** — a model with no configured price is refused; a $0 price is
   refused at startup; a POST to an endpoint caudao doesn't meter is refused; and a
   reply caudao cannot read (compressed, or not JSON on a metered endpoint) is
@@ -50,7 +54,7 @@ and enforces the budget on the live token stream:
   cap by 48x).
 - **Invisible otherwise** — bytes pass through unmodified (no response
   buffering: one line on the common path, one event while reassembling a
-  multi-line `data:` field, ~150 MB/s metering throughput); auth headers are never
+  multi-line `data:` field, ~115 MB/s metering throughput); auth headers are never
   read, stored, or logged.
 
 ## Use
@@ -88,6 +92,59 @@ own pool. Models matching no prefix are held only by `daily_total_usd`.
 
 Cache tokens are billed too (1.25× input for cache writes, 0.1× for reads,
 both overridable per model).
+
+## Proof
+
+Measured 2026-11-05 on an M3 Pro, with `claude-haiku-5-5` through Claude Code 2.1.312.
+
+**Real streams report output once, at the end.** In all 4 replies captured
+(`--include-partial-messages`; 153, 240, 172 and 289 content deltas) there was
+exactly one `message_delta`, and it was the second-to-last event. That is what
+these replies did, not a promise about the API. Until 2026-11-05 caudao charged
+output only from that event, and its own mock sent one after every delta, so
+every test passed while a real reply could not be cut.
+
+**The cut, on a test server with that event order.** Replies of 400 deltas, each
+64 bytes, 8,000 tokens reported at the end, $4.00 at the test price, against a
+$0.80 cap:
+
+| | streams cut mid-reply | deltas reaching the client | ledger after the stream |
+|---|---|---|---|
+| before the fix | 0 of 50 | 400 of 400 | $4.00, 5x the cap |
+| after the fix | 1,000 of 1,000 | at most 49 of 400 | at most $0.8015 |
+
+From the moment upstream wrote the delta that crossed the cap:
+
+| over 1,000 streams | p50 | p99 | max |
+|---|---|---|---|
+| client has the breaker event | 268 µs | 521 µs | 2.2 ms |
+| upstream sees the hang-up | 1.26 ms | 1.35 ms | 2.7 ms |
+
+This is loopback and the proxy's own cost, nothing more. The test server only
+checks for a hang-up between deltas, which are 1 ms apart. Run it:
+`CAUDAO_PROOF_N=1000 go test -run TestCutProof -v -count=1 .`
+
+**One real reply through a real proxy.** A 500-word essay with a $0.004 cap (output
+priced at a placeholder $5/MTok, input near zero). The client got 136 deltas and
+1,593 bytes of text and no `message_delta`; the same prompt uncapped ran to 3,157
+bytes. The ledger held 801 output tokens, 798 of them the estimate. Claude Code then
+retried 9 times over 137 seconds; caudao answered each with a 429, so none reached
+the API.
+
+**What still fails.**
+
+- **Hidden thinking is invisible until the end.** `thinking_delta` carried 0 bytes
+  in all 4 replies while 197 to 3,076 thinking tokens were billed, 16% to 74% of
+  each reply's output. Those tokens are charged at the final `message_delta`, so a
+  long thinking pass is not cut; the visible text after it is.
+- **The estimate is deliberately high.** At 2 bytes a token it never under-counted
+  visible text here (measured 3.19 and 3.16 English, 2.31 Vietnamese, 2.28 Korean),
+  but it over-counts English about 1.6x, so a reply near the cap can be cut early.
+- **A cut reply is charged an estimate.** Upstream never reports it, and may bill
+  for tokens generated before it noticed the hang-up, which is not measured.
+- **Your agent may wait.** Claude Code treats a 429 as retryable, so at the cap it
+  stalls for about two minutes and then fails. It spends nothing while it does.
+- One live cut is one live cut. The numbers above are the test server's.
 
 ## What it is not
 

@@ -52,7 +52,11 @@ func main() {
 		p, err := caudao.NewProxy(cfg, ledger)
 		die(err)
 		fmt.Printf("caudao: metering %s on %s (daily cap $%.2f)\n", cfg.Upstream, *listen, cfg.DailyTotalUSD)
-		fmt.Printf("caudao: point your agent at it: ANTHROPIC_BASE_URL=http://localhost%s\n", *listen)
+		addr := *listen
+		if strings.HasPrefix(addr, ":") {
+			addr = "localhost" + addr
+		}
+		fmt.Printf("caudao: point your agent at it: ANTHROPIC_BASE_URL=http://%s\n", addr)
 		die(http.ListenAndServe(*listen, p))
 	case "mock":
 		fs := flag.NewFlagSet("mock", flag.ExitOnError)

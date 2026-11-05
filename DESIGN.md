@@ -20,7 +20,7 @@ they flow. Design constraints:
 
 - **No response buffering.** A data field that is valid JSON on its own is
   metered and forwarded as its line is read, so the common case holds one SSE
-  line and time-to-first-token overhead is a line scan (~150 MB/s throughput
+  line and time-to-first-token overhead is a line scan (~115 MB/s throughput
   measured; real LLM streams are KB/s). A payload that does not parse alone
   may be one field of a multi-line event — SSE joins an event's data fields
   with `\n` and dispatches at the blank line — so those lines are held to the
@@ -29,10 +29,15 @@ they flow. Design constraints:
   than forwarding is deliberate: an event that trips the breaker must still be
   droppable when its last line arrives.
 - **Incremental charging.** `message_start` charges input + cache tokens
-  once; each `message_delta` carries a cumulative `output_tokens`, so the
-  charge is the delta against the last seen value. Partial responses are
-  charged for exactly what streamed before the cut — including the request
-  that trips the breaker (spend is recorded first, then the circuit opens).
+  once. Output is reported by `message_delta` as a cumulative `output_tokens`,
+  but a real reply sends one, after its last byte, so metering only that cannot
+  cut anything. Each content delta therefore adds its bytes to an estimate (2
+  bytes a token), held as a reservation so it costs no disk write and can be
+  replaced: reported usage releases it and charges the true difference. A stream
+  that ends with none reported, cut by the breaker or by the client, turns the
+  estimate into spend, because upstream billed those tokens and a free cut would
+  refill the budget for the next retry. The mock used to send a `message_delta`
+  per delta, which is how this stayed hidden.
 - **A clean cut.** On trip, the reader stops forwarding, emits one synthetic
   `event: error` with type `caudao_budget_exhausted` (Anthropic-shaped, so
   SDKs surface it as a normal API error), then EOF. Closing the wrapped body
