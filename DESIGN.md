@@ -3,10 +3,14 @@
 ## The one decision that matters: fail-closed
 
 Every choice follows from one rule: **when caudao cannot price something, it
-refuses it.** No price for the model → 400. No budget left → 429. A POST to
+refuses it.** No price for the model → 400. No budget left → 402. A POST to
 an endpoint the meter doesn't understand → 403. The alternative — "pass it
 through and hope" — is how budget tools quietly stop being budget tools when
 a provider ships a new endpoint or model.
+
+The budget refusal is 402 and not 429 because the breaker does not reopen until
+midnight: clients retry a 429, and Claude Code also tells its user the limit is
+not theirs. See the Proof block in the README.
 
 The cost of this rule is maintenance honesty: the price table lives in the
 user's config, not the binary, because prices change and a stale hardcoded

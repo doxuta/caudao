@@ -95,7 +95,7 @@ func (p *Proxy) meteredMessages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if trip, reason := p.overBudget(req.Model); trip {
-		refuse(w, http.StatusTooManyRequests, "caudao_budget_exhausted", "caudao: "+reason+" — request refused")
+		refuse(w, http.StatusPaymentRequired, "caudao_budget_exhausted", "caudao: "+reason+" — request refused")
 		return
 	}
 

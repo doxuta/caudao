@@ -189,7 +189,7 @@ func TestPreRequestRefusals(t *testing.T) {
 	ledger.Add("mock-model", Usage{}, 2.0) // exhaust the day
 	resp, _ = http.Post(px.URL+"/v1/messages", "application/json",
 		strings.NewReader(`{"model":"mock-model","messages":[]}`))
-	if resp.StatusCode != http.StatusTooManyRequests {
+	if resp.StatusCode != http.StatusPaymentRequired {
 		t.Fatalf("exhausted budget: got %d", resp.StatusCode)
 	}
 	var e struct {

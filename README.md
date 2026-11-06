@@ -20,7 +20,7 @@ $ caudao demo
 
 ⏱  stream cut after 15 deltas in 431ms — final spend $0.0515 (cap $0.05)
 → follow-up request while the breaker is open:
-  HTTP 429 {"error":{"message":"caudao: daily total budget exhausted ($0.0515 of $0.05) — request refused","type":"caudao_budget_exhausted"},"type":"error"}
+  HTTP 402 {"error":{"message":"caudao: daily total budget exhausted ($0.0515 of $0.05) — request refused","type":"caudao_budget_exhausted"},"type":"error"}
 ```
 
 That demo needs **no API key** — a mock upstream ships in the binary.
@@ -127,9 +127,23 @@ checks for a hang-up between deltas, which are 1 ms apart. Run it:
 **One real reply through a real proxy.** A 500-word essay with a $0.004 cap (output
 priced at a placeholder $5/MTok, input near zero). The client got 136 deltas and
 1,593 bytes of text and no `message_delta`; the same prompt uncapped ran to 3,157
-bytes. The ledger held 801 output tokens, 798 of them the estimate. Claude Code then
-retried 9 times over 137 seconds; caudao answered each with a 429, so none reached
-the API.
+bytes. The ledger held 801 output tokens, 798 of them the estimate.
+
+**At the cap the agent stops, and is told why.** Until v0.3.0 a budget refusal was a
+429. The breaker stays open until midnight, so every retry was wasted. Measured
+2026-11-06, Claude Code 2.1.312 and `anthropic` 2.6.0 for Python, against a local
+server that always answers with the same refusal:
+
+| refusal | Claude Code requests | what Claude Code prints | Python SDK requests |
+|---|---|---|---|
+| 429 | 11, the last at 183 s | `Server is temporarily limiting requests (not your usage limit)`, then caudao's text | 3 |
+| 429 with `x-should-retry: false` | 1 | the same wrong line | not run |
+| 402, what caudao sends now | 1 | `402 caudao: daily total budget exhausted`, exit 1 | 1 |
+
+Through a real `caudao serve` on the real API, one capped reply: cut, exit 1, 7 seconds
+from start to finish. The run before the fix (2026-11-05) spent 137 seconds in 429
+retries after its cut. The TypeScript and Go SDKs have the same retry rule (408, 409,
+429, every 5xx) in their source; only Python was run.
 
 **What still fails.**
 
@@ -142,8 +156,13 @@ the API.
   but it over-counts English about 1.6x, so a reply near the cap can be cut early.
 - **A cut reply is charged an estimate.** Upstream never reports it, and may bill
   for tokens generated before it noticed the hang-up, which is not measured.
-- **Your agent may wait.** Claude Code treats a 429 as retryable, so at the cap it
-  stalls for about two minutes and then fails. It spends nothing while it does.
+- **A harness with its own retry loop may still loop.** Only Claude Code and the
+  Python SDK were measured. Anything else that retries every failure keeps hitting a
+  402; each one is answered locally and spends nothing. Match on the error type
+  `caudao_budget_exhausted`, not on the status.
+- **The cap in the message is rounded to cents**, so a $0.004 test cap reads `$0.00`.
+- **A 502 is still retried, on purpose.** A reply caudao cannot read is charged and
+  answered 502, so a retrying client walks the ledger to the cap and then gets the 402.
 - One live cut is one live cut. The numbers above are the test server's.
 
 ## What it is not

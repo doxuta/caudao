@@ -104,7 +104,7 @@ func TestGzippedStreamIsChargedAndOpensTheBreaker(t *testing.T) {
 		}
 		io.Copy(io.Discard, resp.Body)
 		resp.Body.Close()
-		if resp.StatusCode == http.StatusTooManyRequests {
+		if resp.StatusCode == http.StatusPaymentRequired {
 			sawRefusal = true
 			break
 		}
@@ -574,8 +574,8 @@ func TestPerModelCeilingPoolsEveryModelUnderThePrefix(t *testing.T) {
 		t.Fatal(err)
 	}
 	resp.Body.Close()
-	if resp.StatusCode != http.StatusTooManyRequests {
-		t.Errorf("sibling model over the pooled ceiling: HTTP %d, want 429", resp.StatusCode)
+	if resp.StatusCode != http.StatusPaymentRequired {
+		t.Errorf("sibling model over the pooled ceiling: HTTP %d, want 402", resp.StatusCode)
 	}
 
 	// A model outside the prefix keeps its own, larger, allowance.

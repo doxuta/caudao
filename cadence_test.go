@@ -95,8 +95,8 @@ func TestBreakerCutsARealCadenceStream(t *testing.T) {
 		t.Fatal(err)
 	}
 	again.Body.Close()
-	if again.StatusCode != http.StatusTooManyRequests {
-		t.Fatalf("request after the cut got %d, want 429", again.StatusCode)
+	if again.StatusCode != http.StatusPaymentRequired {
+		t.Fatalf("request after the cut got %d, want 402", again.StatusCode)
 	}
 }
 
@@ -256,5 +256,26 @@ func TestCutProof(t *testing.T) {
 	}
 	if maxSpent > 2*budget {
 		t.Fatalf("a cut stream left $%.4f on the ledger against a $%.2f cap", maxSpent, budget)
+	}
+}
+
+// The breaker stays open until midnight, so a retry can only waste the agent's
+// time. The Anthropic SDKs retry 408, 409, 429 and every 5xx (their
+// _should_retry / shouldRetry); Claude Code at 429 sent 11 requests over 183 s
+// and told its user "not your usage limit".
+func TestBudgetRefusalIsNotRetryable(t *testing.T) {
+	px, ledger := startProxy(t, DefaultMock(), 1.0)
+	ledger.Add("mock-model", Usage{}, 2.0)
+	resp, err := http.Post(px.URL+"/v1/messages", "application/json",
+		strings.NewReader(`{"model":"mock-model","messages":[]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	switch c := resp.StatusCode; {
+	case c == 408, c == 409, c == 429, c >= 500:
+		t.Fatalf("budget refusal is HTTP %d, which SDKs retry", c)
+	case c != http.StatusPaymentRequired:
+		t.Fatalf("budget refusal is HTTP %d, want 402", c)
 	}
 }
