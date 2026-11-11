@@ -33,7 +33,9 @@ they flow. Design constraints:
   than forwarding is deliberate: an event that trips the breaker must still be
   droppable when its last line arrives.
 - **Incremental charging.** `message_start` charges input + cache tokens
-  once. Output is reported by `message_delta` as a cumulative `output_tokens`,
+  once; `message_delta` usage is cumulative, and a server tool grows the input
+  after `message_start`, so each field it reports is charged by how much it
+  grew (a field left out never refunds). Output is reported by `message_delta` as a cumulative `output_tokens`,
   but a real reply sends one, after its last byte, so metering only that cannot
   cut anything. Each content delta therefore adds its bytes to an estimate (2
   bytes a token), held as a reservation so it costs no disk write and can be

@@ -45,7 +45,10 @@ type meterReader struct {
 	tripReason string
 	done       bool
 
-	lastOutput   int
+	// charged is the usage billed so far. message_delta usage is cumulative,
+	// and a server tool (web_search, web_fetch) grows the input after
+	// message_start, so every field is charged by how much it grew.
+	charged      Usage
 	inputCharged bool
 	estBytes     int
 }
@@ -276,7 +279,7 @@ func (m *meterReader) inspectPayload(payload []byte) {
 		if !m.inputCharged {
 			delta = u
 			m.inputCharged = true
-			m.lastOutput = u.OutputTokens
+			m.charged = u
 		}
 	case "content_block_delta":
 		m.estBytes += len(ev.Delta.Text) + len(ev.Delta.PartialJSON) + len(ev.Delta.Thinking)
@@ -288,9 +291,13 @@ func (m *meterReader) inspectPayload(payload []byte) {
 		}
 		return
 	case "message_delta":
-		if out := ev.Usage.OutputTokens; out > m.lastOutput {
-			delta = Usage{OutputTokens: out - m.lastOutput}
-			m.lastOutput = out
+		// A field left out decodes to 0 and so never refunds.
+		u := ev.Usage
+		delta = Usage{
+			InputTokens:         grow(&m.charged.InputTokens, u.InputTokens),
+			OutputTokens:        grow(&m.charged.OutputTokens, u.OutputTokens),
+			CacheCreationTokens: grow(&m.charged.CacheCreationTokens, u.CacheCreationTokens),
+			CacheReadTokens:     grow(&m.charged.CacheReadTokens, u.CacheReadTokens),
 		}
 	default:
 		return
@@ -305,6 +312,16 @@ func (m *meterReader) inspectPayload(payload []byte) {
 		m.tripped = true
 		m.tripReason = reason
 	}
+}
+
+// grow returns how far a cumulative count moved past *charged, and records it.
+func grow(charged *int, now int) int {
+	if now <= *charged {
+		return 0
+	}
+	d := now - *charged
+	*charged = now
+	return d
 }
 
 func (m *meterReader) breakerEvent() string {

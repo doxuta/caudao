@@ -32,7 +32,9 @@ into ten thousand Opus calls. Client-side budget flags only work if every
 client honors them; caudao sits **under** all of them, at the network layer,
 and enforces the budget on the live token stream:
 
-- **Metered mid-stream** — input and cache tokens come from `message_start`.
+- **Metered mid-stream** — input and cache tokens come from `message_start`,
+  plus whatever `message_delta` adds: a reply that runs a server tool
+  (web search, web fetch) reports more input at the end.
   Output tokens are reported only by `message_delta`, which a real reply sends
   once, after its last byte ([Proof](#proof)), so caudao estimates them from the
   bytes of each content delta as it flows and trips on that. Reported usage
@@ -129,6 +131,14 @@ priced at a placeholder $5/MTok, input near zero). The client got 136 deltas and
 1,593 bytes of text and no `message_delta`; the same prompt uncapped ran to 3,157
 bytes. The ledger held 801 output tokens, 798 of them the estimate.
 
+**Server tools grow the input after `message_start`.** Captured 2026-11-11, Claude
+Code 2.1.312's WebSearch call on `claude-haiku-5-5`: `message_start` said 2,914
+input tokens and the closing `message_delta` 14,949, its usage being cumulative.
+Until v0.3.1 caudao charged the 2,914 and missed 12,035, 80% of that reply's
+input. The three plain replies in the same session repeated their input and cache
+counts unchanged in `message_delta`, so v0.3.1 charges them nothing extra. The
+regression test replays those numbers in that event order.
+
 **At the cap the agent stops, and is told why.** Until v0.3.0 a budget refusal was a
 429. The breaker stays open until midnight, so every retry was wasted. Measured
 2026-11-06, Claude Code 2.1.312 and `anthropic` 2.6.0 for Python, against a local
@@ -160,6 +170,11 @@ retries after its cut. The TypeScript and Go SDKs have the same retry rule (408,
   Python SDK were measured. Anything else that retries every failure keeps hitting a
   402; each one is answered locally and spends nothing. Match on the error type
   `caudao_budget_exhausted`, not on the status.
+- **Server-tool input arrives at the end, so it cannot cut that reply.** It is
+  charged then, and the next request is the one refused.
+- **Server-tool request fees are not metered.** Web search is billed per search
+  on top of tokens (`server_tool_use.web_search_requests`); caudao ignores it, so
+  a search-heavy agent spends more than the ledger shows.
 - **The cap in the message is rounded to cents**, so a $0.004 test cap reads `$0.00`.
 - **A 502 is still retried, on purpose.** A reply caudao cannot read is charged and
   answered 502, so a retrying client walks the ledger to the cap and then gets the 402.

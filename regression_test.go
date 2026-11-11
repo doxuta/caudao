@@ -619,3 +619,54 @@ func TestReservationsCountAgainstThePooledCeiling(t *testing.T) {
 		t.Error("a sibling model's in-flight reservation did not count against the pooled ceiling")
 	}
 }
+
+// A reply that runs a server tool (web_search, web_fetch) reads the context
+// again for every pass, and only the final message_delta says so: its usage is
+// cumulative. Captured 2026-11-11 from Claude Code 2.1.312's WebSearch call on
+// claude-haiku-5-5: message_start reported 2,914 input tokens, the closing
+// message_delta 14,949. caudao charged input from message_start only, so it
+// missed 12,035 of them, 80% of the input. The same capture's plain replies
+// repeat message_start's input and cache counts in message_delta unchanged, so
+// those must not be charged twice, and a message_delta that leaves the input
+// fields out must not refund what message_start charged.
+func TestCumulativeInputInMessageDeltaIsCharged(t *testing.T) {
+	cases := []struct {
+		name       string
+		start, end string // usage objects of message_start and message_delta
+		want       Usage
+	}{
+		{"server tool: input grows after message_start",
+			`{"input_tokens":2914,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":3}`,
+			`{"input_tokens":14949,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":725,"server_tool_use":{"web_search_requests":1,"web_fetch_requests":0}}`,
+			Usage{InputTokens: 14949, OutputTokens: 725}},
+		{"plain reply: the same counts repeated",
+			`{"input_tokens":2,"cache_creation_input_tokens":22891,"cache_read_input_tokens":10670,"output_tokens":1}`,
+			`{"input_tokens":2,"cache_creation_input_tokens":22891,"cache_read_input_tokens":10670,"output_tokens":288}`,
+			Usage{InputTokens: 2, CacheCreationTokens: 22891, CacheReadTokens: 10670, OutputTokens: 288}},
+		{"message_delta without input fields",
+			`{"input_tokens":2914,"cache_read_input_tokens":500,"output_tokens":3}`,
+			`{"output_tokens":725}`,
+			Usage{InputTokens: 2914, CacheReadTokens: 500, OutputTokens: 725}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			upstream := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "text/event-stream")
+				fmt.Fprintf(w, "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":%s}}\n\n", tc.start)
+				fmt.Fprint(w, "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Go 1.27\"}}\n\n")
+				fmt.Fprintf(w, "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":%s}\n\n", tc.end)
+				fmt.Fprint(w, "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
+			})
+			px, ledger := startProxy(t, upstream, 100)
+			resp, err := http.Post(px.URL+"/v1/messages", "application/json", strings.NewReader(streamReq))
+			if err != nil {
+				t.Fatal(err)
+			}
+			drain(resp)
+			want := mockPrice(t).Cost(tc.want)
+			if got, _ := ledger.Committed("mock-model"); fmt.Sprintf("%.6f", got) != fmt.Sprintf("%.6f", want) {
+				t.Errorf("ledger holds $%.6f, want $%.6f for %+v", got, want, tc.want)
+			}
+		})
+	}
+}
