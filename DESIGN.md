@@ -35,7 +35,8 @@ they flow. Design constraints:
 - **Incremental charging.** `message_start` charges input + cache tokens
   once; `message_delta` usage is cumulative, and a server tool grows the input
   after `message_start`, so each field it reports is charged by how much it
-  grew (a field left out never refunds). Output is reported by `message_delta` as a cumulative `output_tokens`,
+  grew (a field left out never refunds). The web search count in
+  `server_tool_use` is one of those fields, priced per search, not per token. Output is reported by `message_delta` as a cumulative `output_tokens`,
   but a real reply sends one, after its last byte, so metering only that cannot
   cut anything. Each content delta therefore adds its bytes to an estimate (2
   bytes a token), held as a reservation so it costs no disk write and can be

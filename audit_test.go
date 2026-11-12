@@ -26,6 +26,10 @@ func TestValidateRejectsNonPositivePrice(t *testing.T) {
 	if err := c.Validate(); err == nil {
 		t.Fatal("Validate accepted a negative cache multiplier")
 	}
+	c = &Config{DailyTotalUSD: 25, Prices: PriceTable{"claude-": {InputPerMTok: 15, OutputPerMTok: 75, WebSearchPer1K: -10}}}
+	if err := c.Validate(); err == nil {
+		t.Fatal("Validate accepted a negative web search fee")
+	}
 }
 
 // ---- FINDING 10: upstream URL validation and path prefix ------------------

@@ -34,7 +34,8 @@ and enforces the budget on the live token stream:
 
 - **Metered mid-stream** — input and cache tokens come from `message_start`,
   plus whatever `message_delta` adds: a reply that runs a server tool
-  (web search, web fetch) reports more input at the end.
+  (web search, web fetch) reports more input at the end, and each web search
+  adds its fee ($10 per 1,000, `server_tool_use.web_search_requests`).
   Output tokens are reported only by `message_delta`, which a real reply sends
   once, after its last byte ([Proof](#proof)), so caudao estimates them from the
   bytes of each content delta as it flows and trips on that. Reported usage
@@ -93,7 +94,8 @@ prefix owns a model, so a narrower entry such as `"claude-opus-5": 5.0` is its
 own pool. Models matching no prefix are held only by `daily_total_usd`.
 
 Cache tokens are billed too (1.25× input for cache writes, 0.1× for reads,
-both overridable per model).
+both overridable per model), and so is each web search ($10 per 1,000,
+`web_search_per_1k` per model).
 
 ## Proof
 
@@ -139,6 +141,16 @@ input. The three plain replies in the same session repeated their input and cach
 counts unchanged in `message_delta`, so v0.3.1 charges them nothing extra. The
 regression test replays those numbers in that event order.
 
+**A web search costs more than the tokens around it.** The same stream 3 reported
+`web_search_requests: 1`. At the published Haiku 5.5 rates ($0.10 / $0.50 per MTok,
+[pricing](https://platform.claude.com/docs/en/about-claude/pricing)) its 14,949
+input and 725 output tokens cost $0.0019; the search costs $0.01 on top, 84% of
+that reply's bill. Until v0.3.2 caudao charged only the tokens. Now each search is
+charged by how much the cumulative count grew, from the stream or from a
+non-streaming body, at `web_search_per_1k` per price entry (default $10).
+`TestWebSearchFeeIsCharged` covers 1 and 3 searches, a count repeated from
+`message_start`, a free web fetch and a non-streaming body.
+
 **At the cap the agent stops, and is told why.** Until v0.3.0 a budget refusal was a
 429. The breaker stays open until midnight, so every retry was wasted. Measured
 2026-11-06, Claude Code 2.1.312 and `anthropic` 2.6.0 for Python, against a local
@@ -172,9 +184,11 @@ retries after its cut. The TypeScript and Go SDKs have the same retry rule (408,
   `caudao_budget_exhausted`, not on the status.
 - **Server-tool input arrives at the end, so it cannot cut that reply.** It is
   charged then, and the next request is the one refused.
-- **Server-tool request fees are not metered.** Web search is billed per search
-  on top of tokens (`server_tool_use.web_search_requests`); caudao ignores it, so
-  a search-heavy agent spends more than the ledger shows.
+- **The search fee also lands at the end.** Like the extra input, it trips the
+  next request, not the reply that ran the search.
+- **Code execution is not metered.** It is billed by container hours (1,550 free
+  a month, then $0.05 an hour) and is free alongside `web_search_20260209` or
+  `web_fetch_20260209`; the usage object reports a request count, not hours.
 - **The cap in the message is rounded to cents**, so a $0.004 test cap reads `$0.00`.
 - **A 502 is still retried, on purpose.** A reply caudao cannot read is charged and
   answered 502, so a retrying client walks the ledger to the cap and then gets the 402.

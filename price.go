@@ -21,6 +21,16 @@ type Price struct {
 	// conventional 1.25× for cache writes and 0.1× for cache reads.
 	CacheWriteMult float64 `json:"cache_write_mult,omitempty"`
 	CacheReadMult  float64 `json:"cache_read_mult,omitempty"`
+	// WebSearchPer1K is the USD fee per 1,000 web searches, billed on top of
+	// tokens. Zero falls back to the documented $10.
+	WebSearchPer1K float64 `json:"web_search_per_1k,omitempty"`
+}
+
+func (p Price) webSearch() float64 {
+	if p.WebSearchPer1K > 0 {
+		return p.WebSearchPer1K / 1000
+	}
+	return 10.0 / 1000
 }
 
 func (p Price) cacheWrite() float64 {
@@ -43,6 +53,15 @@ type Usage struct {
 	OutputTokens        int `json:"output_tokens"`
 	CacheCreationTokens int `json:"cache_creation_input_tokens"`
 	CacheReadTokens     int `json:"cache_read_input_tokens"`
+	// ServerToolUse counts server-tool calls. Only web search carries a fee;
+	// web fetch is free and code execution is billed by container time, which
+	// the usage object does not report.
+	ServerToolUse ServerToolUse `json:"server_tool_use"`
+}
+
+// ServerToolUse is usage.server_tool_use. A plain struct keeps Usage comparable.
+type ServerToolUse struct {
+	WebSearchRequests int `json:"web_search_requests"`
 }
 
 // Cost returns the USD cost of u at price p.
@@ -52,7 +71,8 @@ func (p Price) Cost(u Usage) float64 {
 	return float64(u.InputTokens)*in +
 		float64(u.OutputTokens)*out +
 		float64(u.CacheCreationTokens)*in*p.cacheWrite() +
-		float64(u.CacheReadTokens)*in*p.cacheRead()
+		float64(u.CacheReadTokens)*in*p.cacheRead() +
+		float64(u.ServerToolUse.WebSearchRequests)*p.webSearch()
 }
 
 // PriceTable maps a model-name prefix to its price. Longest prefix wins, so

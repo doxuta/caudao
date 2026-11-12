@@ -65,8 +65,8 @@ func (c *Config) Validate() error {
 				"(input %g, output %g) — a $0 price can never trip the breaker (fail-closed)",
 				prefix, p.InputPerMTok, p.OutputPerMTok)
 		}
-		if p.CacheWriteMult < 0 || p.CacheReadMult < 0 {
-			return fmt.Errorf("caudao: price entry %q has a negative cache multiplier (fail-closed)", prefix)
+		if p.CacheWriteMult < 0 || p.CacheReadMult < 0 || p.WebSearchPer1K < 0 {
+			return fmt.Errorf("caudao: price entry %q has a negative cache multiplier or web search fee (fail-closed)", prefix)
 		}
 	}
 	return nil

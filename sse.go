@@ -298,6 +298,9 @@ func (m *meterReader) inspectPayload(payload []byte) {
 			OutputTokens:        grow(&m.charged.OutputTokens, u.OutputTokens),
 			CacheCreationTokens: grow(&m.charged.CacheCreationTokens, u.CacheCreationTokens),
 			CacheReadTokens:     grow(&m.charged.CacheReadTokens, u.CacheReadTokens),
+			ServerToolUse: ServerToolUse{
+				WebSearchRequests: grow(&m.charged.ServerToolUse.WebSearchRequests, u.ServerToolUse.WebSearchRequests),
+			},
 		}
 	default:
 		return

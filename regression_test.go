@@ -638,7 +638,7 @@ func TestCumulativeInputInMessageDeltaIsCharged(t *testing.T) {
 		{"server tool: input grows after message_start",
 			`{"input_tokens":2914,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":3}`,
 			`{"input_tokens":14949,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":725,"server_tool_use":{"web_search_requests":1,"web_fetch_requests":0}}`,
-			Usage{InputTokens: 14949, OutputTokens: 725}},
+			Usage{InputTokens: 14949, OutputTokens: 725, ServerToolUse: ServerToolUse{WebSearchRequests: 1}}},
 		{"plain reply: the same counts repeated",
 			`{"input_tokens":2,"cache_creation_input_tokens":22891,"cache_read_input_tokens":10670,"output_tokens":1}`,
 			`{"input_tokens":2,"cache_creation_input_tokens":22891,"cache_read_input_tokens":10670,"output_tokens":288}`,
@@ -669,4 +669,74 @@ func TestCumulativeInputInMessageDeltaIsCharged(t *testing.T) {
 			}
 		})
 	}
+}
+
+// Web search is billed per search on top of tokens: $10 per 1,000 searches
+// (https://platform.claude.com/docs/en/about-claude/pricing, "Web search tool").
+// The count arrives as usage.server_tool_use.web_search_requests, cumulative in
+// message_delta like the token fields. A real capture (Claude Code 2.1.312,
+// WebSearch, 2026-11-11) had web_search_requests: 1 in the message_delta of the
+// stream that ran the search; caudao charged the tokens and not the search.
+func TestWebSearchFeeIsCharged(t *testing.T) {
+	const search = 10.0 / 1000 // USD per search at the documented default
+	tokens := Usage{InputTokens: 14949, OutputTokens: 725}
+	cases := []struct {
+		name       string
+		start, end string
+		searches   int
+	}{
+		{"one search, reported at message_delta",
+			`{"input_tokens":2914,"output_tokens":3}`,
+			`{"input_tokens":14949,"output_tokens":725,"server_tool_use":{"web_search_requests":1,"web_fetch_requests":0}}`,
+			1},
+		{"three searches",
+			`{"input_tokens":2914,"output_tokens":3}`,
+			`{"input_tokens":14949,"output_tokens":725,"server_tool_use":{"web_search_requests":3}}`,
+			3},
+		{"a count repeated from message_start is charged once",
+			`{"input_tokens":2914,"output_tokens":3,"server_tool_use":{"web_search_requests":1}}`,
+			`{"input_tokens":14949,"output_tokens":725,"server_tool_use":{"web_search_requests":1}}`,
+			1},
+		{"web fetch is free",
+			`{"input_tokens":2914,"output_tokens":3}`,
+			`{"input_tokens":14949,"output_tokens":725,"server_tool_use":{"web_fetch_requests":2}}`,
+			0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			upstream := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "text/event-stream")
+				fmt.Fprintf(w, "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":%s}}\n\n", tc.start)
+				fmt.Fprintf(w, "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":%s}\n\n", tc.end)
+				fmt.Fprint(w, "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
+			})
+			px, ledger := startProxy(t, upstream, 100)
+			resp, err := http.Post(px.URL+"/v1/messages", "application/json", strings.NewReader(streamReq))
+			if err != nil {
+				t.Fatal(err)
+			}
+			drain(resp)
+			want := mockPrice(t).Cost(tokens) + float64(tc.searches)*search
+			if got, _ := ledger.Committed("mock-model"); fmt.Sprintf("%.6f", got) != fmt.Sprintf("%.6f", want) {
+				t.Errorf("ledger holds $%.6f, want $%.6f (%d search(es))", got, want, tc.searches)
+			}
+		})
+	}
+	t.Run("non-streaming body", func(t *testing.T) {
+		upstream := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			io.WriteString(w, `{"id":"msg_1","usage":{"input_tokens":14949,"output_tokens":725,"server_tool_use":{"web_search_requests":2}}}`)
+		})
+		px, ledger := startProxy(t, upstream, 100)
+		resp, err := http.Post(px.URL+"/v1/messages", "application/json",
+			strings.NewReader(`{"model":"mock-model","messages":[]}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		drain(resp)
+		want := mockPrice(t).Cost(tokens) + 2*search
+		if got, _ := ledger.Spent("mock-model"); fmt.Sprintf("%.6f", got) != fmt.Sprintf("%.6f", want) {
+			t.Errorf("ledger holds $%.6f, want $%.6f (2 searches)", got, want)
+		}
+	})
 }
