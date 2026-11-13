@@ -97,6 +97,22 @@ Cache tokens are billed too (1.25× input for cache writes, 0.1× for reads,
 both overridable per model), and so is each web search ($10 per 1,000,
 `web_search_per_1k` per model).
 
+A model priced by prompt length gets a second tier. Claude Haiku 5.5 bills every
+token of a request whose prompt (input + cache writes + cache reads) is over
+100,000 tokens at 5×:
+
+```json
+"claude-haiku-5-5": {
+  "input_per_mtok": 0.10, "output_per_mtok": 0.50,
+  "long_prompt_over_tokens": 100000,
+  "long_prompt": { "input_per_mtok": 0.50, "output_per_mtok": 2.50 }
+}
+```
+
+The tier is chosen per request, on everything reported so far: a reply whose
+server tool pushes the prompt over the line is re-priced in full. A `long_prompt`
+cheaper than its base, or without a threshold, is refused at startup.
+
 ## Proof
 
 Measured 2026-11-05 on an M3 Pro, with `claude-haiku-5-5` through Claude Code 2.1.312.
@@ -151,6 +167,18 @@ non-streaming body, at `web_search_per_1k` per price entry (default $10).
 `TestWebSearchFeeIsCharged` covers 1 and 3 searches, a count repeated from
 `message_start`, a free web fetch and a non-streaming body.
 
+**One rate per model under-charged long Haiku prompts 5×.** The pricing page
+lists Claude Haiku 5.5 twice: $0.10 / $0.50 per MTok for prompts up to 100,000
+tokens, $0.50 / $2.50 over it, cache reads included in the count. Until v0.3.3
+a prefix had one rate. With Haiku 5.5's published low rate in the table, a
+120,000-token prompt (110,000 of it cache reads) with 1,000 output tokens was
+charged $0.0026 instead of $0.0130, and the breaker opened five times too late.
+The old example config priced every `claude-haiku` at 0.8 / 4, above both tiers,
+so a config left at that example over-charged instead. `TestLongPromptTierIsCharged` covers that case, exactly
+100,000 (not over, still the low rate), a server tool that pushes the prompt from
+90,000 to 130,000 inside one reply, and a non-streaming body. No live call: the
+numbers are the published rates.
+
 **At the cap the agent stops, and is told why.** Until v0.3.0 a budget refusal was a
 429. The breaker stays open until midnight, so every retry was wasted. Measured
 2026-11-06, Claude Code 2.1.312 and `anthropic` 2.6.0 for Python, against a local
@@ -184,6 +212,12 @@ retries after its cut. The TypeScript and Go SDKs have the same retry rule (408,
   `caudao_budget_exhausted`, not on the status.
 - **Server-tool input arrives at the end, so it cannot cut that reply.** It is
   charged then, and the next request is the one refused.
+- **The long-prompt tier after a server tool is a reading, not a measurement.**
+  The pricing page counts "all of its input tokens"; caudao applies that to the
+  cumulative input a server tool reports, the higher of the two readings. A
+  request whose prompt crosses 100,000 only that way was not observed live.
+- **US-only inference is not metered.** `inference_geo` multiplies every price by
+  1.1; caudao does not read the request for it. Raise the table by 10% if you use it.
 - **The search fee also lands at the end.** Like the extra input, it trips the
   next request, not the reply that ran the search.
 - **Code execution is not metered.** It is billed by container hours (1,550 free

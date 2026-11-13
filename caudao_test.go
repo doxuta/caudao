@@ -101,7 +101,7 @@ func TestMeterReaderPassthroughAndCounting(t *testing.T) {
 		"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
 	}
 	var got Usage
-	mr := newMeterReader(sseStream(in...), func(u Usage) (bool, string) {
+	mr := newMeterReader(sseStream(in...), func(_, u Usage) (bool, string) {
 		got.InputTokens += u.InputTokens
 		got.OutputTokens += u.OutputTokens
 		return false, ""
@@ -125,7 +125,7 @@ func TestMeterReaderTrips(t *testing.T) {
 		"data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":200}}\n",
 	}
 	calls := 0
-	mr := newMeterReader(sseStream(in...), func(u Usage) (bool, string) {
+	mr := newMeterReader(sseStream(in...), func(_, u Usage) (bool, string) {
 		calls++
 		return calls == 2, "test budget gone" // trip on the first delta
 	}, nil)
@@ -258,7 +258,7 @@ func BenchmarkMeterReaderPassthrough(b *testing.B) {
 	b.SetBytes(int64(len(payload)))
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
-		mr := newMeterReader(io.NopCloser(bytes.NewReader(payload)), func(Usage) (bool, string) { return false, "" }, nil)
+		mr := newMeterReader(io.NopCloser(bytes.NewReader(payload)), func(_, _ Usage) (bool, string) { return false, "" }, nil)
 		io.Copy(io.Discard, mr)
 	}
 }

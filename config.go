@@ -68,6 +68,16 @@ func (c *Config) Validate() error {
 		if p.CacheWriteMult < 0 || p.CacheReadMult < 0 || p.WebSearchPer1K < 0 {
 			return fmt.Errorf("caudao: price entry %q has a negative cache multiplier or web search fee (fail-closed)", prefix)
 		}
+		if l := p.LongPrompt; l != nil {
+			// A long-prompt price below the base rate would charge less for
+			// the bigger request: a cheaper tier is a typo, not a price.
+			if p.LongPromptOverTokens <= 0 || l.LongPrompt != nil ||
+				l.InputPerMTok < p.InputPerMTok || l.OutputPerMTok < p.OutputPerMTok ||
+				l.CacheWriteMult < 0 || l.CacheReadMult < 0 || l.WebSearchPer1K < 0 {
+				return fmt.Errorf("caudao: price entry %q has a bad long_prompt: it needs long_prompt_over_tokens > 0 "+
+					"and rates no lower than the base price (fail-closed)", prefix)
+			}
+		}
 	}
 	return nil
 }
@@ -122,7 +132,12 @@ const ExampleConfig = `{
   "prices": {
     "claude-opus": { "input_per_mtok": 15.0, "output_per_mtok": 75.0 },
     "claude-sonnet": { "input_per_mtok": 3.0, "output_per_mtok": 15.0 },
-    "claude-haiku": { "input_per_mtok": 0.8, "output_per_mtok": 4.0 }
+    "claude-haiku": { "input_per_mtok": 1.0, "output_per_mtok": 5.0 },
+    "claude-haiku-5-5": {
+      "input_per_mtok": 0.10, "output_per_mtok": 0.50,
+      "long_prompt_over_tokens": 100000,
+      "long_prompt": { "input_per_mtok": 0.50, "output_per_mtok": 2.50 }
+    }
   },
   "ledger_path": "caudao-ledger.json"
 }

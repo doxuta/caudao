@@ -1,6 +1,7 @@
 package caudao
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -8,6 +9,27 @@ import (
 )
 
 // ---- FINDING 2: zero/missing price rates make Cost() return $0 -------------
+
+func TestValidateRejectsBadLongPrompt(t *testing.T) {
+	long := &Price{InputPerMTok: 0.5, OutputPerMTok: 2.5}
+	cases := map[string]Price{
+		"no threshold":   {InputPerMTok: 0.1, OutputPerMTok: 0.5, LongPrompt: long},
+		"cheaper input":  {InputPerMTok: 1, OutputPerMTok: 0.5, LongPromptOverTokens: 100000, LongPrompt: long},
+		"zero output":    {InputPerMTok: 0.1, OutputPerMTok: 0.5, LongPromptOverTokens: 100000, LongPrompt: &Price{InputPerMTok: 0.5}},
+		"nested tier":    {InputPerMTok: 0.1, OutputPerMTok: 0.5, LongPromptOverTokens: 100000, LongPrompt: &Price{InputPerMTok: 0.5, OutputPerMTok: 2.5, LongPrompt: long}},
+		"negative cache": {InputPerMTok: 0.1, OutputPerMTok: 0.5, LongPromptOverTokens: 100000, LongPrompt: &Price{InputPerMTok: 0.5, OutputPerMTok: 2.5, CacheReadMult: -1}},
+	}
+	for name, p := range cases {
+		c := &Config{DailyTotalUSD: 25, Prices: PriceTable{"claude-haiku-5-5": p}}
+		if err := c.Validate(); err == nil {
+			t.Errorf("%s: Validate accepted a long_prompt price that can under-charge", name)
+		}
+	}
+	ok := &Config{DailyTotalUSD: 25, Prices: PriceTable{"claude-haiku-5-5": {InputPerMTok: 0.1, OutputPerMTok: 0.5, LongPromptOverTokens: 100000, LongPrompt: long}}}
+	if err := ok.Validate(); err != nil {
+		t.Fatalf("Validate refused a good long_prompt price: %v", err)
+	}
+}
 
 func TestValidateRejectsNonPositivePrice(t *testing.T) {
 	cases := map[string]PriceTable{
@@ -76,5 +98,18 @@ func TestUpstreamPathPrefixIsPreserved(t *testing.T) {
 	resp.Body.Close()
 	if gotPath != "/anthropic-gateway/v1/messages" {
 		t.Fatalf("upstream path prefix dropped: got %q", gotPath)
+	}
+}
+
+func TestExampleConfigIsValid(t *testing.T) {
+	var c Config
+	if err := json.Unmarshal([]byte(ExampleConfig), &c); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if p, _ := c.Prices.Lookup("claude-haiku-5-5"); p.LongPrompt == nil {
+		t.Fatal("the example has no long-prompt tier for claude-haiku-5-5")
 	}
 }

@@ -2,6 +2,7 @@ package caudao
 
 import (
 	"compress/gzip"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -739,4 +740,95 @@ func TestWebSearchFeeIsCharged(t *testing.T) {
 			t.Errorf("ledger holds $%.6f, want $%.6f (2 searches)", got, want)
 		}
 	})
+}
+
+// Claude Haiku 5.5 is priced by prompt length: a request whose prompt (input,
+// cache writes and cache reads) is over 100,000 tokens pays 5x on every token,
+// output included (platform.claude.com/docs/en/about-claude/pricing.md, "Long
+// context pricing"). One rate per prefix charged a 120k-token prompt a fifth of
+// its bill: the breaker opened five times too late.
+func TestLongPromptTierIsCharged(t *testing.T) {
+	const cfgJSON = `{"daily_total_usd": 100, "prices": {"mock-model": {
+		"input_per_mtok": 0.10, "output_per_mtok": 0.50,
+		"long_prompt_over_tokens": 100000,
+		"long_prompt": {"input_per_mtok": 0.50, "output_per_mtok": 2.50}}}}`
+	short := Price{InputPerMTok: 0.10, OutputPerMTok: 0.50}
+	long := Price{InputPerMTok: 0.50, OutputPerMTok: 2.50}
+	cases := []struct {
+		name       string
+		start, end string
+		want       float64
+	}{
+		{"cache reads count toward the prompt",
+			`{"input_tokens":10000,"cache_read_input_tokens":110000,"output_tokens":1}`,
+			`{"input_tokens":10000,"cache_read_input_tokens":110000,"output_tokens":1000}`,
+			long.Cost(Usage{InputTokens: 10000, CacheReadTokens: 110000, OutputTokens: 1000})},
+		{"exactly 100,000 is not over",
+			`{"input_tokens":100000,"output_tokens":1}`,
+			`{"input_tokens":100000,"output_tokens":1000}`,
+			short.Cost(Usage{InputTokens: 100000, OutputTokens: 1000})},
+		{"a server tool that pushes the prompt over re-prices the whole reply",
+			`{"input_tokens":90000,"output_tokens":1}`,
+			`{"input_tokens":130000,"output_tokens":500}`,
+			long.Cost(Usage{InputTokens: 130000, OutputTokens: 500})},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			upstream := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "text/event-stream")
+				fmt.Fprintf(w, "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":%s}}\n\n", tc.start)
+				fmt.Fprintf(w, "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":%s}\n\n", tc.end)
+				fmt.Fprint(w, "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
+			})
+			px, ledger := startProxyJSON(t, upstream, cfgJSON)
+			resp, err := http.Post(px.URL+"/v1/messages", "application/json", strings.NewReader(streamReq))
+			if err != nil {
+				t.Fatal(err)
+			}
+			drain(resp)
+			if got, _ := ledger.Committed("mock-model"); fmt.Sprintf("%.6f", got) != fmt.Sprintf("%.6f", tc.want) {
+				t.Errorf("ledger holds $%.6f, want $%.6f", got, tc.want)
+			}
+		})
+	}
+	t.Run("non-streaming body", func(t *testing.T) {
+		upstream := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			io.WriteString(w, `{"id":"msg_1","usage":{"input_tokens":150000,"output_tokens":200}}`)
+		})
+		px, ledger := startProxyJSON(t, upstream, cfgJSON)
+		resp, err := http.Post(px.URL+"/v1/messages", "application/json",
+			strings.NewReader(`{"model":"mock-model","messages":[]}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		drain(resp)
+		want := long.Cost(Usage{InputTokens: 150000, OutputTokens: 200})
+		if got, _ := ledger.Spent("mock-model"); fmt.Sprintf("%.6f", got) != fmt.Sprintf("%.6f", want) {
+			t.Errorf("ledger holds $%.6f, want $%.6f", got, want)
+		}
+	})
+}
+
+// startProxyJSON is startProxy with a config parsed the way LoadConfig parses it.
+func startProxyJSON(t *testing.T, upstream http.Handler, cfgJSON string) (*httptest.Server, *Ledger) {
+	t.Helper()
+	up := httptest.NewServer(upstream)
+	t.Cleanup(up.Close)
+	var cfg Config
+	if err := json.Unmarshal([]byte(cfgJSON), &cfg); err != nil {
+		t.Fatal(err)
+	}
+	cfg.Upstream = up.URL
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	ledger := memLedger()
+	p, err := NewProxy(&cfg, ledger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	px := httptest.NewServer(p)
+	t.Cleanup(px.Close)
+	return px, ledger
 }

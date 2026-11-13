@@ -157,7 +157,7 @@ func TestHangUpKeepsTheEstimate(t *testing.T) {
 func TestEstimateCountsEveryOutputDelta(t *testing.T) {
 	for typ, field := range map[string]string{"text_delta": "text", "input_json_delta": "partial_json", "thinking_delta": "thinking"} {
 		var got int
-		m := newMeterReader(http.NoBody, func(Usage) (bool, string) { return false, "" }, nil)
+		m := newMeterReader(http.NoBody, func(_, _ Usage) (bool, string) { return false, "" }, nil)
 		m.onEstimate = func(tokens int) (bool, string) { got = tokens; return false, "" }
 		m.inspectPayload([]byte(fmt.Sprintf(`{"type":"content_block_delta","delta":{"type":%q,%q:"%s"}}`, typ, field, strings.Repeat("x", 100))))
 		if got != 50 {
@@ -165,7 +165,7 @@ func TestEstimateCountsEveryOutputDelta(t *testing.T) {
 		}
 	}
 	var got int
-	m := newMeterReader(http.NoBody, func(Usage) (bool, string) { return false, "" }, nil)
+	m := newMeterReader(http.NoBody, func(_, _ Usage) (bool, string) { return false, "" }, nil)
 	m.onEstimate = func(tokens int) (bool, string) { got = tokens; return false, "" }
 	m.inspectPayload([]byte(`{"type":"content_block_delta","delta":{"type":"signature_delta","signature":"abcd"}}`))
 	if got != 0 {

@@ -155,13 +155,14 @@ func (p *Proxy) overBudget(model string) (bool, string) {
 	return false, ""
 }
 
-// account records usage and answers whether the breaker should trip now.
-func (p *Proxy) account(model string, u Usage) (bool, string) {
+// account records usage u of a request already charged for before, and
+// answers whether the breaker should trip now.
+func (p *Proxy) account(model string, before, u Usage) (bool, string) {
 	price, ok := p.cfg.Prices.Lookup(model)
 	if !ok {
 		return true, fmt.Sprintf("model %q lost its price mid-flight", model)
 	}
-	if _, _, err := p.ledger.Add(model, u, price.Cost(u)); err != nil {
+	if _, _, err := p.ledger.Add(model, u, price.Charge(before, u)); err != nil {
 		log.Printf("caudao: ledger persist failed (still enforcing in memory): %v", err)
 	}
 	return p.overBudget(model)
@@ -186,6 +187,7 @@ func (p *Proxy) modifyResponse(resp *http.Response) error {
 		// tokens, and a free cut would refill the budget for the next retry.
 		var drop func()
 		held := 0
+		var heldBase Usage // what the request was charged when held was estimated
 		release := func() {
 			if drop != nil {
 				drop()
@@ -193,26 +195,26 @@ func (p *Proxy) modifyResponse(resp *http.Response) error {
 			drop, held = nil, 0
 		}
 		price, _ := p.cfg.Prices.Lookup(meta.model)
-		meter := newMeterReader(resp.Body, func(u Usage) (bool, string) {
+		meter := newMeterReader(resp.Body, func(before, u Usage) (bool, string) {
 			// Real usage supersedes the estimate: release the reservation
 			// before accounting, so a request is never tripped by its own
 			// placeholder — only by committed spend and other requests'
 			// reservations.
 			meta.free()
 			release()
-			return p.account(meta.model, u)
+			return p.account(meta.model, before, u)
 		}, func() {
 			meta.free()
 			if tokens := held; tokens > 0 {
 				release()
-				p.account(meta.model, Usage{OutputTokens: tokens})
+				p.account(meta.model, heldBase, Usage{OutputTokens: tokens})
 			}
 		})
 		meter.onEstimate = func(tokens int) (bool, string) {
 			meta.free()
 			release()
-			drop = p.ledger.Reserve(meta.model, price.Cost(Usage{OutputTokens: tokens}))
-			held = tokens
+			drop = p.ledger.Reserve(meta.model, price.Charge(meter.charged, Usage{OutputTokens: tokens}))
+			held, heldBase = tokens, meter.charged
 			return p.overBudget(meta.model)
 		}
 		resp.Body = meter
@@ -237,9 +239,9 @@ func (p *Proxy) modifyResponse(resp *http.Response) error {
 		// Charge a pessimistic estimate so the breaker still moves, and say so.
 		log.Printf("caudao: could not read usage from a %d-byte %s reply for %s (%v) — charging the unmetered estimate",
 			len(body), ct, meta.model, err)
-		p.account(meta.model, unmeteredEstimate)
+		p.account(meta.model, Usage{}, unmeteredEstimate)
 	} else {
-		p.account(meta.model, msg.Usage) // post-hoc: blocks the NEXT request
+		p.account(meta.model, Usage{}, msg.Usage) // post-hoc: blocks the NEXT request
 	}
 	resp.Body = io.NopCloser(bytes.NewReader(body))
 	resp.ContentLength = int64(len(body))
@@ -270,7 +272,7 @@ var unmeteredEstimate = Usage{InputTokens: 50_000, OutputTokens: 10_000}
 // without limit, the "wrong zero charge" unmeteredEstimate warns about.
 func (p *Proxy) unmeterable(resp *http.Response, meta *reqMeta, reason string) error {
 	meta.free() // the estimate replaces the reservation
-	p.account(meta.model, unmeteredEstimate)
+	p.account(meta.model, Usage{}, unmeteredEstimate)
 	log.Printf("caudao: %s for %s — charging the unmetered estimate", reason, meta.model)
 	resp.Body.Close()
 	payload, _ := json.Marshal(map[string]any{

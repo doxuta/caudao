@@ -25,7 +25,7 @@ type meterReader struct {
 	src     *bufio.Reader
 	closer  io.Closer
 	outbox  bytes.Buffer
-	onUsage func(delta Usage) (trip bool, reason string)
+	onUsage func(before, delta Usage) (trip bool, reason string)
 	// onEstimate gets the output tokens this reply has streamed since usage was
 	// last reported, estimated from their bytes; nil skips the estimate.
 	onEstimate func(tokens int) (trip bool, reason string)
@@ -53,7 +53,7 @@ type meterReader struct {
 	estBytes     int
 }
 
-func newMeterReader(body io.ReadCloser, onUsage func(Usage) (bool, string), onDone func()) *meterReader {
+func newMeterReader(body io.ReadCloser, onUsage func(before, delta Usage) (bool, string), onDone func()) *meterReader {
 	return &meterReader{
 		src:     bufio.NewReaderSize(body, 32*1024),
 		closer:  body,
@@ -272,6 +272,9 @@ func (m *meterReader) inspectPayload(payload []byte) {
 	if json.Unmarshal(payload, &ev) != nil {
 		return
 	}
+	// before is what this request was charged up to this event; the price of
+	// a delta can depend on it (a long-prompt tier).
+	before := m.charged
 	var delta Usage
 	switch ev.Type {
 	case "message_start":
@@ -311,7 +314,7 @@ func (m *meterReader) inspectPayload(payload []byte) {
 	if delta == (Usage{}) && !estimated {
 		return
 	}
-	if trip, reason := m.onUsage(delta); trip {
+	if trip, reason := m.onUsage(before, delta); trip {
 		m.tripped = true
 		m.tripReason = reason
 	}

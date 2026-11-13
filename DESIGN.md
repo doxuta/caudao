@@ -36,7 +36,7 @@ they flow. Design constraints:
   once; `message_delta` usage is cumulative, and a server tool grows the input
   after `message_start`, so each field it reports is charged by how much it
   grew (a field left out never refunds). The web search count in
-  `server_tool_use` is one of those fields, priced per search, not per token. Output is reported by `message_delta` as a cumulative `output_tokens`,
+  `server_tool_use` is one of those fields, priced per search, not per token. The price of a delta can depend on what came before it: with a `long_prompt` tier the request is priced on its whole prompt so far, and a delta that carries it over the threshold re-prices what was already charged (`Price.Charge`). Output is reported by `message_delta` as a cumulative `output_tokens`,
   but a real reply sends one, after its last byte, so metering only that cannot
   cut anything. Each content delta therefore adds its bytes to an estimate (2
   bytes a token), held as a reservation so it costs no disk write and can be

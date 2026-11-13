@@ -24,6 +24,30 @@ type Price struct {
 	// WebSearchPer1K is the USD fee per 1,000 web searches, billed on top of
 	// tokens. Zero falls back to the documented $10.
 	WebSearchPer1K float64 `json:"web_search_per_1k,omitempty"`
+	// LongPrompt, when set, is the price of a request whose prompt (input,
+	// cache writes and cache reads) is over LongPromptOverTokens: Claude Haiku
+	// 5.5 bills every token of such a request at 5x. Its zero cache
+	// multipliers and web search fee fall back to this price's.
+	LongPromptOverTokens int    `json:"long_prompt_over_tokens,omitempty"`
+	LongPrompt           *Price `json:"long_prompt,omitempty"`
+}
+
+// at returns the price that applies to a request whose usage so far is u.
+func (p Price) at(u Usage) Price {
+	if p.LongPrompt == nil || u.InputTokens+u.CacheCreationTokens+u.CacheReadTokens <= p.LongPromptOverTokens {
+		return p
+	}
+	l := *p.LongPrompt
+	if l.CacheWriteMult == 0 {
+		l.CacheWriteMult = p.CacheWriteMult
+	}
+	if l.CacheReadMult == 0 {
+		l.CacheReadMult = p.CacheReadMult
+	}
+	if l.WebSearchPer1K == 0 {
+		l.WebSearchPer1K = p.WebSearchPer1K
+	}
+	return l
 }
 
 func (p Price) webSearch() float64 {
@@ -59,13 +83,41 @@ type Usage struct {
 	ServerToolUse ServerToolUse `json:"server_tool_use"`
 }
 
+func (u Usage) plus(v Usage) Usage {
+	return Usage{
+		InputTokens:         u.InputTokens + v.InputTokens,
+		OutputTokens:        u.OutputTokens + v.OutputTokens,
+		CacheCreationTokens: u.CacheCreationTokens + v.CacheCreationTokens,
+		CacheReadTokens:     u.CacheReadTokens + v.CacheReadTokens,
+		ServerToolUse: ServerToolUse{
+			WebSearchRequests: u.ServerToolUse.WebSearchRequests + v.ServerToolUse.WebSearchRequests,
+		},
+	}
+}
+
 // ServerToolUse is usage.server_tool_use. A plain struct keeps Usage comparable.
 type ServerToolUse struct {
 	WebSearchRequests int `json:"web_search_requests"`
 }
 
-// Cost returns the USD cost of u at price p.
+// Cost returns the USD cost of one request whose whole usage is u.
 func (p Price) Cost(u Usage) float64 {
+	return p.at(u).rate(u)
+}
+
+// Charge returns what delta adds to a request that has already been charged
+// for before. A delta that carries the prompt over the long-prompt threshold
+// also re-prices what was charged before at the lower rate.
+func (p Price) Charge(before, delta Usage) float64 {
+	after := before.plus(delta)
+	if p.at(after) != p.at(before) {
+		return p.Cost(after) - p.Cost(before)
+	}
+	return p.at(after).rate(delta)
+}
+
+// rate prices u at p's own rates, ignoring LongPrompt.
+func (p Price) rate(u Usage) float64 {
 	in := p.InputPerMTok / 1e6
 	out := p.OutputPerMTok / 1e6
 	return float64(u.InputTokens)*in +
