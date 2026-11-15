@@ -202,9 +202,9 @@ published rate in the table, a fast reply of 3,000 input, 20,000 cache-read and 
 output tokens was charged $0.0320 instead of $0.0640: half its bill. The old example
 config priced every `claude-opus` at 15 / 75, above every published fast rate, so a
 config left at that example over-charged instead. `TestFastModeIsCharged` covers the
-streaming and non-streaming settle, the mid-stream estimate of a stream that ends
-without usage, the unmeterable-reply estimate and the in-flight reservation; each
-held half the right amount on v0.3.3. That Claude Code sends the field was checked
+streaming and non-streaming settle, the estimate held while a reply streams, the
+estimate charged when a stream ends without usage, the unmeterable-reply estimate
+and the in-flight reservation; each held half the right amount on v0.3.3. That Claude Code sends the field was checked
 on 2026-11-15 with a local server that records only the request body and answers
 400 (so no API call, $0): Claude Code 2.1.312 with `--settings '{"fastMode":true}'`
 sent `"speed": "fast"` at the top level of all 6 requests to `/v1/messages`, and

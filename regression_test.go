@@ -1,6 +1,7 @@
 package caudao
 
 import (
+	"bufio"
 	"compress/gzip"
 	"encoding/json"
 	"fmt"
@@ -892,6 +893,32 @@ func TestFastModeIsCharged(t *testing.T) {
 		}), cfgJSON)
 		drain(post(t, px, fastStream))
 		got, _ := ledger.Committed("mock-model")
+		start := Usage{InputTokens: 3000, OutputTokens: 1}
+		same(t, got, fast.Cost(start)+fast.Charge(start, Usage{OutputTokens: 2000 / bytesPerToken}))
+	})
+	t.Run("the mid-stream estimate is held at fast", func(t *testing.T) {
+		release := make(chan struct{})
+		px, ledger := startProxyJSON(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "text/event-stream")
+			fmt.Fprint(w, "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":3000,\"output_tokens\":1}}}\n\n")
+			fmt.Fprintf(w, "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"%s\"}}\n\n", strings.Repeat("x", 2000))
+			w.(http.Flusher).Flush()
+			<-release
+		}), cfgJSON)
+		resp := post(t, px, fastStream)
+		defer resp.Body.Close()
+		r := bufio.NewReader(resp.Body)
+		for {
+			line, err := r.ReadString('\n')
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(line, "text_delta") {
+				break
+			}
+		}
+		got, _ := ledger.Spent("mock-model")
+		close(release)
 		start := Usage{InputTokens: 3000, OutputTokens: 1}
 		same(t, got, fast.Cost(start)+fast.Charge(start, Usage{OutputTokens: 2000 / bytesPerToken}))
 	})
