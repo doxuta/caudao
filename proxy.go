@@ -18,6 +18,7 @@ const metaKey ctxKey = 0
 
 type reqMeta struct {
 	model   string
+	price   Price  // resolved once, for the model and the requested speed
 	release func() // frees this request's budget reservation
 }
 
@@ -84,14 +85,24 @@ func (p *Proxy) meteredMessages(w http.ResponseWriter, r *http.Request) {
 	}
 	var req struct {
 		Model string `json:"model"`
+		Speed string `json:"speed"`
 	}
 	if err := json.Unmarshal(body, &req); err != nil || req.Model == "" {
 		refuse(w, http.StatusBadRequest, "caudao_bad_request", "caudao: request has no model field")
 		return
 	}
-	if _, ok := p.cfg.Prices.Lookup(req.Model); !ok {
+	base, ok := p.cfg.Prices.Lookup(req.Model)
+	if !ok {
 		refuse(w, http.StatusBadRequest, "caudao_unpriced_model",
 			fmt.Sprintf("caudao: model %q has no configured price (fail-closed); add it to the prices table", req.Model))
+		return
+	}
+	// The speed is read from the request, not from usage.speed: it is known
+	// before the request is forwarded, so the reservation is right too.
+	price, ok := base.ForSpeed(req.Speed)
+	if !ok {
+		refuse(w, http.StatusBadRequest, "caudao_unpriced_speed",
+			fmt.Sprintf("caudao: model %q has no fast price (fail-closed); add \"fast\" to its prices entry", req.Model))
 		return
 	}
 	if trip, reason := p.overBudget(req.Model); trip {
@@ -102,8 +113,8 @@ func (p *Proxy) meteredMessages(w http.ResponseWriter, r *http.Request) {
 	// Hold a pessimistic estimate against the budget for as long as this
 	// request is in flight, so concurrent requests cannot all spend the same
 	// headroom. Settled spend replaces it when the response completes.
-	release := p.ledger.Reserve(req.Model, p.reservation(req.Model))
-	meta := &reqMeta{model: req.Model, release: release}
+	release := p.ledger.Reserve(req.Model, price.Cost(reservationUsage))
+	meta := &reqMeta{model: req.Model, price: price, release: release}
 	defer meta.free()
 
 	r = r.WithContext(context.WithValue(r.Context(), metaKey, meta))
@@ -119,18 +130,9 @@ func (m *reqMeta) free() {
 	}
 }
 
-// reservation is what one in-flight request holds against the budget. It is
-// deliberately pessimistic — the cost of a fairly long reply — because the
-// overshoot a race can produce is bounded by how much is NOT reserved.
-func (p *Proxy) reservation(model string) float64 {
-	price, ok := p.cfg.Prices.Lookup(model)
-	if !ok {
-		return 0
-	}
-	return price.Cost(reservationUsage)
-}
-
-// reservationUsage is the shape of reply a reservation assumes. It only has
+// reservationUsage is the shape of reply a reservation assumes: what one
+// in-flight request holds against the budget, because the overshoot a race
+// can produce is bounded by how much is NOT reserved. It only has
 // to cover the window between forwarding a request and its first usage event,
 // so it is a modest placeholder rather than a worst case: too large a value
 // would refuse legitimate concurrent traffic on a small budget.
@@ -157,15 +159,11 @@ func (p *Proxy) overBudget(model string) (bool, string) {
 
 // account records usage u of a request already charged for before, and
 // answers whether the breaker should trip now.
-func (p *Proxy) account(model string, before, u Usage) (bool, string) {
-	price, ok := p.cfg.Prices.Lookup(model)
-	if !ok {
-		return true, fmt.Sprintf("model %q lost its price mid-flight", model)
-	}
-	if _, _, err := p.ledger.Add(model, u, price.Charge(before, u)); err != nil {
+func (p *Proxy) account(meta *reqMeta, before, u Usage) (bool, string) {
+	if _, _, err := p.ledger.Add(meta.model, u, meta.price.Charge(before, u)); err != nil {
 		log.Printf("caudao: ledger persist failed (still enforcing in memory): %v", err)
 	}
-	return p.overBudget(model)
+	return p.overBudget(meta.model)
 }
 
 func (p *Proxy) modifyResponse(resp *http.Response) error {
@@ -194,7 +192,6 @@ func (p *Proxy) modifyResponse(resp *http.Response) error {
 			}
 			drop, held = nil, 0
 		}
-		price, _ := p.cfg.Prices.Lookup(meta.model)
 		meter := newMeterReader(resp.Body, func(before, u Usage) (bool, string) {
 			// Real usage supersedes the estimate: release the reservation
 			// before accounting, so a request is never tripped by its own
@@ -202,18 +199,18 @@ func (p *Proxy) modifyResponse(resp *http.Response) error {
 			// reservations.
 			meta.free()
 			release()
-			return p.account(meta.model, before, u)
+			return p.account(meta, before, u)
 		}, func() {
 			meta.free()
 			if tokens := held; tokens > 0 {
 				release()
-				p.account(meta.model, heldBase, Usage{OutputTokens: tokens})
+				p.account(meta, heldBase, Usage{OutputTokens: tokens})
 			}
 		})
 		meter.onEstimate = func(tokens int) (bool, string) {
 			meta.free()
 			release()
-			drop = p.ledger.Reserve(meta.model, price.Charge(meter.charged, Usage{OutputTokens: tokens}))
+			drop = p.ledger.Reserve(meta.model, meta.price.Charge(meter.charged, Usage{OutputTokens: tokens}))
 			held, heldBase = tokens, meter.charged
 			return p.overBudget(meta.model)
 		}
@@ -239,9 +236,9 @@ func (p *Proxy) modifyResponse(resp *http.Response) error {
 		// Charge a pessimistic estimate so the breaker still moves, and say so.
 		log.Printf("caudao: could not read usage from a %d-byte %s reply for %s (%v) — charging the unmetered estimate",
 			len(body), ct, meta.model, err)
-		p.account(meta.model, Usage{}, unmeteredEstimate)
+		p.account(meta, Usage{}, unmeteredEstimate)
 	} else {
-		p.account(meta.model, Usage{}, msg.Usage) // post-hoc: blocks the NEXT request
+		p.account(meta, Usage{}, msg.Usage) // post-hoc: blocks the NEXT request
 	}
 	resp.Body = io.NopCloser(bytes.NewReader(body))
 	resp.ContentLength = int64(len(body))
@@ -272,7 +269,7 @@ var unmeteredEstimate = Usage{InputTokens: 50_000, OutputTokens: 10_000}
 // without limit, the "wrong zero charge" unmeteredEstimate warns about.
 func (p *Proxy) unmeterable(resp *http.Response, meta *reqMeta, reason string) error {
 	meta.free() // the estimate replaces the reservation
-	p.account(meta.model, Usage{}, unmeteredEstimate)
+	p.account(meta, Usage{}, unmeteredEstimate)
 	log.Printf("caudao: %s for %s — charging the unmetered estimate", reason, meta.model)
 	resp.Body.Close()
 	payload, _ := json.Marshal(map[string]any{

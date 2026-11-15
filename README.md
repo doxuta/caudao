@@ -113,6 +113,22 @@ The tier is chosen per request, on everything reported so far: a reply whose
 server tool pushes the prompt over the line is re-priced in full. A `long_prompt`
 cheaper than its base, or without a threshold, is refused at startup.
 
+Fast mode has its own price. A request sent with `"speed": "fast"` (Claude Code's
+`/fast`) is charged at the entry's `fast` rates, with the same cache multipliers
+and search fee unless the tier sets its own:
+
+```json
+"claude-opus-5-5": {
+  "input_per_mtok": 4, "output_per_mtok": 20,
+  "fast": { "input_per_mtok": 8, "output_per_mtok": 40 }
+}
+```
+
+A fast request for a model whose entry has no `fast` is refused with
+`caudao_unpriced_speed`, before it reaches the API: what caudao cannot price, it
+does not forward. A `fast` cheaper than its base, or with a tier of its own, is
+refused at startup.
+
 ## Proof
 
 Measured 2026-11-05 on an M3 Pro, with `claude-haiku-5-5` through Claude Code 2.1.312.
@@ -179,6 +195,23 @@ so a config left at that example over-charged instead. `TestLongPromptTierIsChar
 90,000 to 130,000 inside one reply, and a non-streaming body. No live call: the
 numbers are the published rates.
 
+**Fast mode was charged at the standard rate.** Claude Opus 5.5 costs $4 / $20 per
+MTok, and $8 / $40 with `"speed": "fast"` (pricing page, fetched 2026-11-15; Fable
+5.2 doubles the same way). Until v0.3.4 caudao never read `speed`. With Opus 5.5's
+published rate in the table, a fast reply of 3,000 input, 20,000 cache-read and 800
+output tokens was charged $0.0320 instead of $0.0640: half its bill. The old example
+config priced every `claude-opus` at 15 / 75, above every published fast rate, so a
+config left at that example over-charged instead. `TestFastModeIsCharged` covers the
+streaming and non-streaming settle, the mid-stream estimate of a stream that ends
+without usage, the unmeterable-reply estimate and the in-flight reservation; each
+held half the right amount on v0.3.3. That Claude Code sends the field was checked
+on 2026-11-15 with a local server that records only the request body and answers
+400 (so no API call, $0): Claude Code 2.1.312 with `--settings '{"fastMode":true}'`
+sent `"speed": "fast"` at the top level of all 6 requests to `/v1/messages`, and
+none without it. Through `caudao serve` with no `fast` price, v0.3.3 forwarded all 6;
+v0.3.4 refused the first with `caudao_unpriced_speed` and forwarded none. The fast
+price itself is the published rate, not a measured bill.
+
 **At the cap the agent stops, and is told why.** Until v0.3.0 a budget refusal was a
 429. The breaker stays open until midnight, so every retry was wasted. Measured
 2026-11-06, Claude Code 2.1.312 and `anthropic` 2.6.0 for Python, against a local
@@ -216,6 +249,11 @@ retries after its cut. The TypeScript and Go SDKs have the same retry rule (408,
   The pricing page counts "all of its input tokens"; caudao applies that to the
   cumulative input a server tool reports, the higher of the two readings. A
   request whose prompt crosses 100,000 only that way was not observed live.
+- **Fast mode is read from the request, not from `usage.speed`.** Claude Opus 4.6
+  can accept `"speed": "fast"` and run at standard speed; caudao then charges the
+  fast rate, too much, on the safe side. Microsoft Foundry's fast deployments use
+  their own model IDs ending in `-fast` and send no `speed`: give them their own
+  prefix entry at the fast rate.
 - **US-only inference is not metered.** `inference_geo` multiplies every price by
   1.1; caudao does not read the request for it. Raise the table by 10% if you use it.
 - **The search fee also lands at the end.** Like the extra input, it trips the

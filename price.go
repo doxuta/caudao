@@ -30,6 +30,34 @@ type Price struct {
 	// multipliers and web search fee fall back to this price's.
 	LongPromptOverTokens int    `json:"long_prompt_over_tokens,omitempty"`
 	LongPrompt           *Price `json:"long_prompt,omitempty"`
+	// Fast, when set, is the price of a request sent with "speed": "fast"
+	// (Claude Opus 5.5: $8 / $40 instead of $4 / $20). It covers the whole
+	// context window, so the base LongPrompt does not apply to it; its zero
+	// cache multipliers and web search fee fall back to this price's. A fast
+	// request on a price with no Fast is refused.
+	Fast *Price `json:"fast,omitempty"`
+}
+
+// ForSpeed returns the price of a request sent with the given speed, and false
+// when speed is "fast" and p has no fast tier.
+func (p Price) ForSpeed(speed string) (Price, bool) {
+	if speed != "fast" {
+		return p, true
+	}
+	if p.Fast == nil {
+		return Price{}, false
+	}
+	f := *p.Fast
+	if f.CacheWriteMult == 0 {
+		f.CacheWriteMult = p.CacheWriteMult
+	}
+	if f.CacheReadMult == 0 {
+		f.CacheReadMult = p.CacheReadMult
+	}
+	if f.WebSearchPer1K == 0 {
+		f.WebSearchPer1K = p.WebSearchPer1K
+	}
+	return f, true
 }
 
 // at returns the price that applies to a request whose usage so far is u.

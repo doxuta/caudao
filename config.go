@@ -68,10 +68,19 @@ func (c *Config) Validate() error {
 		if p.CacheWriteMult < 0 || p.CacheReadMult < 0 || p.WebSearchPer1K < 0 {
 			return fmt.Errorf("caudao: price entry %q has a negative cache multiplier or web search fee (fail-closed)", prefix)
 		}
+		if f := p.Fast; f != nil {
+			// Fast mode costs more, never less, and a tier has no tiers.
+			if f.Fast != nil || f.LongPrompt != nil ||
+				f.InputPerMTok < p.InputPerMTok || f.OutputPerMTok < p.OutputPerMTok ||
+				f.CacheWriteMult < 0 || f.CacheReadMult < 0 || f.WebSearchPer1K < 0 {
+				return fmt.Errorf("caudao: price entry %q has a bad fast price: it needs rates no lower than "+
+					"the base price and no tier of its own (fail-closed)", prefix)
+			}
+		}
 		if l := p.LongPrompt; l != nil {
 			// A long-prompt price below the base rate would charge less for
 			// the bigger request: a cheaper tier is a typo, not a price.
-			if p.LongPromptOverTokens <= 0 || l.LongPrompt != nil ||
+			if p.LongPromptOverTokens <= 0 || l.LongPrompt != nil || l.Fast != nil ||
 				l.InputPerMTok < p.InputPerMTok || l.OutputPerMTok < p.OutputPerMTok ||
 				l.CacheWriteMult < 0 || l.CacheReadMult < 0 || l.WebSearchPer1K < 0 {
 				return fmt.Errorf("caudao: price entry %q has a bad long_prompt: it needs long_prompt_over_tokens > 0 "+
@@ -130,7 +139,10 @@ const ExampleConfig = `{
     "claude-haiku": 2.0
   },
   "prices": {
-    "claude-opus": { "input_per_mtok": 15.0, "output_per_mtok": 75.0 },
+    "claude-opus": {
+      "input_per_mtok": 15.0, "output_per_mtok": 75.0,
+      "fast": { "input_per_mtok": 15.0, "output_per_mtok": 75.0 }
+    },
     "claude-sonnet": { "input_per_mtok": 3.0, "output_per_mtok": 15.0 },
     "claude-haiku": { "input_per_mtok": 1.0, "output_per_mtok": 5.0 },
     "claude-haiku-5-5": {

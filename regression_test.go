@@ -614,7 +614,8 @@ func TestReservationsCountAgainstThePooledCeiling(t *testing.T) {
 	ledger := memLedger()
 	p, _ := NewProxy(cfg, ledger)
 
-	release := ledger.Reserve("claude-opus-4-1", p.reservation("claude-opus-4-1")) // ~$0.0675
+	price, _ := cfg.Prices.Lookup("claude-opus-4-1")
+	release := ledger.Reserve("claude-opus-4-1", price.Cost(reservationUsage)) // ~$0.0675
 	defer release()
 	if over, _ := p.overBudget("claude-opus-4-5"); !over {
 		t.Error("a sibling model's in-flight reservation did not count against the pooled ceiling")
@@ -831,4 +832,131 @@ func startProxyJSON(t *testing.T, upstream http.Handler, cfgJSON string) (*httpt
 	px := httptest.NewServer(p)
 	t.Cleanup(px.Close)
 	return px, ledger
+}
+
+// TestFastModeIsCharged: a request with "speed": "fast" is billed at the fast
+// mode price (Claude Opus 5.5: $8 / $40 per MTok instead of $4 / $20), and the
+// cache multipliers stack on top of it. Every path that prices a request must
+// use the same tier: the settle (streaming and not), the mid-stream estimate,
+// the unmeterable estimate and the in-flight reservation.
+func TestFastModeIsCharged(t *testing.T) {
+	const cfgJSON = `{"daily_total_usd": 100, "prices": {"mock-model": {
+		"input_per_mtok": 4, "output_per_mtok": 20, "cache_read_mult": 0.05,
+		"fast": {"input_per_mtok": 8, "output_per_mtok": 40}}}}`
+	std := Price{InputPerMTok: 4, OutputPerMTok: 20, CacheReadMult: 0.05}
+	fast := Price{InputPerMTok: 8, OutputPerMTok: 40, CacheReadMult: 0.05}
+	const fastStream = `{"model":"mock-model","stream":true,"speed":"fast","max_tokens":100000,"messages":[]}`
+	const fastBody = `{"model":"mock-model","speed":"fast","messages":[]}`
+	full := func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":3000,\"cache_read_input_tokens\":20000,\"output_tokens\":1}}}\n\n")
+		fmt.Fprint(w, "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":800}}\n\n")
+		fmt.Fprint(w, "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
+	}
+	reply := Usage{InputTokens: 3000, CacheReadTokens: 20000, OutputTokens: 800}
+	post := func(t *testing.T, px *httptest.Server, body string) *http.Response {
+		t.Helper()
+		resp, err := http.Post(px.URL+"/v1/messages", "application/json", strings.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return resp
+	}
+	same := func(t *testing.T, got, want float64) {
+		t.Helper()
+		if fmt.Sprintf("%.6f", got) != fmt.Sprintf("%.6f", want) {
+			t.Errorf("ledger holds $%.6f, want $%.6f", got, want)
+		}
+	}
+
+	t.Run("streaming", func(t *testing.T) {
+		px, ledger := startProxyJSON(t, http.HandlerFunc(full), cfgJSON)
+		drain(post(t, px, fastStream))
+		got, _ := ledger.Committed("mock-model")
+		same(t, got, fast.Cost(reply))
+	})
+	t.Run("non-streaming", func(t *testing.T) {
+		px, ledger := startProxyJSON(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			io.WriteString(w, `{"id":"msg_1","usage":{"input_tokens":3000,"cache_read_input_tokens":20000,"output_tokens":800,"speed":"fast"}}`)
+		}), cfgJSON)
+		drain(post(t, px, fastBody))
+		got, _ := ledger.Spent("mock-model")
+		same(t, got, fast.Cost(reply))
+	})
+	t.Run("a stream that ends without usage is charged its estimate at fast", func(t *testing.T) {
+		px, ledger := startProxyJSON(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "text/event-stream")
+			fmt.Fprint(w, "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":3000,\"output_tokens\":1}}}\n\n")
+			fmt.Fprintf(w, "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"%s\"}}\n\n", strings.Repeat("x", 2000))
+		}), cfgJSON)
+		drain(post(t, px, fastStream))
+		got, _ := ledger.Committed("mock-model")
+		start := Usage{InputTokens: 3000, OutputTokens: 1}
+		same(t, got, fast.Cost(start)+fast.Charge(start, Usage{OutputTokens: 2000 / bytesPerToken}))
+	})
+	t.Run("an unmeterable reply is charged its estimate at fast", func(t *testing.T) {
+		px, ledger := startProxyJSON(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "text/plain")
+			io.WriteString(w, "hello")
+		}), cfgJSON)
+		drain(post(t, px, fastBody))
+		got, _ := ledger.Spent("mock-model")
+		same(t, got, fast.Cost(unmeteredEstimate))
+	})
+	t.Run("the in-flight reservation is held at fast", func(t *testing.T) {
+		var ledger *Ledger
+		var held float64
+		px, l := startProxyJSON(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			held, _ = ledger.Spent("mock-model")
+			full(w, r)
+		}), cfgJSON)
+		ledger = l
+		drain(post(t, px, fastStream))
+		same(t, held, fast.Cost(reservationUsage))
+	})
+	t.Run("control: no speed field is charged standard", func(t *testing.T) {
+		px, ledger := startProxyJSON(t, http.HandlerFunc(full), cfgJSON)
+		drain(post(t, px, streamReq))
+		got, _ := ledger.Committed("mock-model")
+		same(t, got, std.Cost(reply))
+	})
+	t.Run("a fast request on a price with no fast tier is refused", func(t *testing.T) {
+		called := false
+		px, ledger := startProxyJSON(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			called = true
+			full(w, r)
+		}), `{"daily_total_usd": 100, "prices": {"mock-model": {"input_per_mtok": 4, "output_per_mtok": 20}}}`)
+		resp := post(t, px, fastStream)
+		b, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusBadRequest || !strings.Contains(string(b), "caudao_unpriced_speed") || called {
+			t.Errorf("got %d %s (upstream called: %v), want 400 caudao_unpriced_speed before upstream", resp.StatusCode, b, called)
+		}
+		if got, _ := ledger.Spent("mock-model"); got != 0 {
+			t.Errorf("a refused request spent $%.6f", got)
+		}
+	})
+}
+
+// TestValidateRejectsBadFast: a fast tier cheaper than standard is a typo, and
+// a tier inside a tier has no meaning; both are refused at startup.
+func TestValidateRejectsBadFast(t *testing.T) {
+	for name, entry := range map[string]string{
+		"cheaper than standard": `{"input_per_mtok": 4, "output_per_mtok": 20, "fast": {"input_per_mtok": 2, "output_per_mtok": 40}}`,
+		"nested fast":           `{"input_per_mtok": 4, "output_per_mtok": 20, "fast": {"input_per_mtok": 8, "output_per_mtok": 40, "fast": {"input_per_mtok": 9, "output_per_mtok": 45}}}`,
+		"fast inside long_prompt": `{"input_per_mtok": 1, "output_per_mtok": 5, "long_prompt_over_tokens": 100000,
+			"long_prompt": {"input_per_mtok": 5, "output_per_mtok": 25, "fast": {"input_per_mtok": 9, "output_per_mtok": 45}}}`,
+		"negative multiplier": `{"input_per_mtok": 4, "output_per_mtok": 20, "fast": {"input_per_mtok": 8, "output_per_mtok": 40, "cache_read_mult": -1}}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			var c Config
+			if err := json.Unmarshal([]byte(`{"daily_total_usd": 1, "prices": {"m": `+entry+`}}`), &c); err != nil {
+				t.Fatal(err)
+			}
+			if err := c.Validate(); err == nil {
+				t.Error("Validate accepted it")
+			}
+		})
+	}
 }
