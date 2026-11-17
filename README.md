@@ -129,6 +129,12 @@ A fast request for a model whose entry has no `fast` is refused with
 does not forward. A `fast` cheaper than its base, or with a tier of its own, is
 refused at startup.
 
+US-only inference is priced on top. A request sent with `"inference_geo": "us"` is
+charged 1.1x on every token category (input, output, cache writes and reads), on
+the long-prompt tier and on fast mode alike; the web search fee is not a token
+price and does not change. `"global"`, or no field, is the standard price. Any other
+geo is refused with `caudao_unpriced_geo` before it reaches the API.
+
 ## Proof
 
 Measured 2026-11-05 on an M3 Pro, with `claude-haiku-5-5` through Claude Code 2.1.312.
@@ -212,6 +218,19 @@ none without it. Through `caudao serve` with no `fast` price, v0.3.3 forwarded a
 v0.3.4 refused the first with `caudao_unpriced_speed` and forwarded none. The fast
 price itself is the published rate, not a measured bill.
 
+**US-only inference was charged at the global rate.** On Claude 4.6 and later,
+`"inference_geo": "us"` costs 1.1x on every token category, Haiku 5.5's long tier
+included, and stacks on fast mode (pricing page and data-residency page, fetched
+2026-11-17). Until v0.3.5 caudao never read the field, so every US-only request was
+charged 10% short and the breaker opened that much late. The same 3,000 input,
+20,000 cache-read and 800 output tokens at Opus 5.5's rate: $0.0320 instead of
+$0.0352; with fast mode too, $0.0640 instead of $0.0704. `TestUSInferenceIsCharged`
+checks hand-computed dollar values for the streaming and non-streaming settle, cache
+writes, the long-prompt tier, fast mode, the mid-stream and end-of-stream estimates,
+the unmeterable-reply estimate and the in-flight reservation (each short by 10% on
+v0.3.4), that the search fee stays $10 per 1,000, and that an unknown geo is refused
+before upstream. The multiplier is the published one, not a measured bill.
+
 **At the cap the agent stops, and is told why.** Until v0.3.0 a budget refusal was a
 429. The breaker stays open until midnight, so every retry was wasted. Measured
 2026-11-06, Claude Code 2.1.312 and `anthropic` 2.6.0 for Python, against a local
@@ -254,8 +273,12 @@ retries after its cut. The TypeScript and Go SDKs have the same retry rule (408,
   fast rate, too much, on the safe side. Microsoft Foundry's fast deployments use
   their own model IDs ending in `-fast` and send no `speed`: give them their own
   prefix entry at the fast rate.
-- **US-only inference is not metered.** `inference_geo` multiplies every price by
-  1.1; caudao does not read the request for it. Raise the table by 10% if you use it.
+- **A workspace that defaults to US-only inference is not seen.** caudao reads
+  `inference_geo` from the request. A workspace whose `default_inference_geo` is
+  `"us"` bills a request without the field at 1.1x, and caudao charges it at the
+  global rate; so does a Microsoft Foundry deployment of the US Data Zone Standard
+  type, which sends no `inference_geo`. Raise those prices by 10% in the table
+  (a request that also says `"us"` is then charged 1.21x, on the safe side).
 - **The search fee also lands at the end.** Like the extra input, it trips the
   next request, not the reply that ran the search.
 - **Code execution is not metered.** It is billed by container hours (1,550 free

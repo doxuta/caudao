@@ -987,3 +987,176 @@ func TestValidateRejectsBadFast(t *testing.T) {
 		})
 	}
 }
+
+// TestUSInferenceIsCharged: a request with "inference_geo": "us" is billed at
+// 1.1x on every token category (input, output, cache writes, cache reads),
+// stacked on fast mode and on Haiku 5.5's long-prompt tier, while the web
+// search fee is not a token price and stays $10 per 1,000. The expected values
+// are worked out by hand from the pricing page, not computed by the code under
+// test. A geo caudao has no multiplier for is refused before upstream.
+func TestUSInferenceIsCharged(t *testing.T) {
+	const cfgJSON = `{"daily_total_usd": 100, "prices": {
+		"mock-model": {"input_per_mtok": 4, "output_per_mtok": 20, "cache_read_mult": 0.05,
+			"fast": {"input_per_mtok": 8, "output_per_mtok": 40}},
+		"mock-haiku": {"input_per_mtok": 0.1, "output_per_mtok": 0.5, "long_prompt_over_tokens": 100000,
+			"long_prompt": {"input_per_mtok": 0.5, "output_per_mtok": 2.5}}}}`
+	const usStream = `{"model":"mock-model","stream":true,"inference_geo":"us","max_tokens":100000,"messages":[]}`
+	const usBody = `{"model":"mock-model","inference_geo":"us","messages":[]}`
+	full := func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":3000,\"cache_read_input_tokens\":20000,\"output_tokens\":1}}}\n\n")
+		fmt.Fprint(w, "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":800}}\n\n")
+		fmt.Fprint(w, "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
+	}
+	jsonReply := func(usage string) http.HandlerFunc {
+		return func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			io.WriteString(w, `{"id":"msg_1","usage":`+usage+`}`)
+		}
+	}
+	post := func(t *testing.T, px *httptest.Server, body string) *http.Response {
+		t.Helper()
+		resp, err := http.Post(px.URL+"/v1/messages", "application/json", strings.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return resp
+	}
+	same := func(t *testing.T, got, want float64) {
+		t.Helper()
+		if fmt.Sprintf("%.6f", got) != fmt.Sprintf("%.6f", want) {
+			t.Errorf("ledger holds $%.6f, want $%.6f", got, want)
+		}
+	}
+	// 3,000 input at $4.40 + 20,000 cache reads at 0.05 x $4.40 + 800 output
+	// at $22 = 0.0132 + 0.0044 + 0.0176.
+	const usReply = 0.035200
+	// 3,000 input at $4.40 + 1,001 output at $22 (1 reported, 1,000 estimated
+	// from 2,000 streamed bytes) = 0.0132 + 0.022022.
+	const usEstimate = 0.035222
+
+	t.Run("streaming", func(t *testing.T) {
+		px, ledger := startProxyJSON(t, http.HandlerFunc(full), cfgJSON)
+		drain(post(t, px, usStream))
+		got, _ := ledger.Committed("mock-model")
+		same(t, got, usReply)
+	})
+	t.Run("non-streaming", func(t *testing.T) {
+		px, ledger := startProxyJSON(t, jsonReply(`{"input_tokens":3000,"cache_read_input_tokens":20000,"output_tokens":800,"inference_geo":"us"}`), cfgJSON)
+		drain(post(t, px, usBody))
+		got, _ := ledger.Spent("mock-model")
+		same(t, got, usReply)
+	})
+	t.Run("cache writes get 1.1x too", func(t *testing.T) {
+		// 10,000 cache writes at 1.25 x $4.40 = 0.055.
+		px, ledger := startProxyJSON(t, jsonReply(`{"input_tokens":0,"cache_creation_input_tokens":10000,"output_tokens":0}`), cfgJSON)
+		drain(post(t, px, usBody))
+		got, _ := ledger.Spent("mock-model")
+		same(t, got, 0.055)
+	})
+	t.Run("the web search fee is not a token price", func(t *testing.T) {
+		// usReply + 2 searches at $10 / 1,000, not $11.
+		px, ledger := startProxyJSON(t, jsonReply(`{"input_tokens":3000,"cache_read_input_tokens":20000,"output_tokens":800,"server_tool_use":{"web_search_requests":2}}`), cfgJSON)
+		drain(post(t, px, usBody))
+		got, _ := ledger.Spent("mock-model")
+		same(t, got, usReply+0.02)
+	})
+	t.Run("stacked on fast mode", func(t *testing.T) {
+		// $8.80 / $44: 0.0264 + 0.0088 + 0.0352.
+		px, ledger := startProxyJSON(t, http.HandlerFunc(full), cfgJSON)
+		drain(post(t, px, `{"model":"mock-model","stream":true,"speed":"fast","inference_geo":"us","max_tokens":100000,"messages":[]}`))
+		got, _ := ledger.Committed("mock-model")
+		same(t, got, 0.070400)
+	})
+	t.Run("stacked on the long-prompt tier", func(t *testing.T) {
+		// 120,000 input at $0.55 + 1,000 output at $2.75 = 0.066 + 0.00275.
+		px, ledger := startProxyJSON(t, jsonReply(`{"input_tokens":120000,"output_tokens":1000}`), cfgJSON)
+		drain(post(t, px, `{"model":"mock-haiku","inference_geo":"us","messages":[]}`))
+		got, _ := ledger.Spent("mock-haiku")
+		same(t, got, 0.068750)
+	})
+	t.Run("a stream that ends without usage is charged its estimate at 1.1x", func(t *testing.T) {
+		px, ledger := startProxyJSON(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "text/event-stream")
+			fmt.Fprint(w, "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":3000,\"output_tokens\":1}}}\n\n")
+			fmt.Fprintf(w, "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"%s\"}}\n\n", strings.Repeat("x", 2000))
+		}), cfgJSON)
+		drain(post(t, px, usStream))
+		got, _ := ledger.Committed("mock-model")
+		same(t, got, usEstimate)
+	})
+	t.Run("the mid-stream estimate is held at 1.1x", func(t *testing.T) {
+		release := make(chan struct{})
+		px, ledger := startProxyJSON(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "text/event-stream")
+			fmt.Fprint(w, "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":3000,\"output_tokens\":1}}}\n\n")
+			fmt.Fprintf(w, "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"%s\"}}\n\n", strings.Repeat("x", 2000))
+			w.(http.Flusher).Flush()
+			<-release
+		}), cfgJSON)
+		resp := post(t, px, usStream)
+		defer resp.Body.Close()
+		r := bufio.NewReader(resp.Body)
+		for {
+			line, err := r.ReadString('\n')
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(line, "text_delta") {
+				break
+			}
+		}
+		got, _ := ledger.Spent("mock-model")
+		close(release)
+		same(t, got, usEstimate)
+	})
+	t.Run("an unmeterable reply is charged its estimate at 1.1x", func(t *testing.T) {
+		// 50,000 input at $4.40 + 10,000 output at $22 = 0.22 + 0.22.
+		px, ledger := startProxyJSON(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "text/plain")
+			io.WriteString(w, "hello")
+		}), cfgJSON)
+		drain(post(t, px, usBody))
+		got, _ := ledger.Spent("mock-model")
+		same(t, got, 0.44)
+	})
+	t.Run("the in-flight reservation is held at 1.1x", func(t *testing.T) {
+		// 2,000 input at $4.40 + 500 output at $22 = 0.0088 + 0.011.
+		var ledger *Ledger
+		var held float64
+		px, l := startProxyJSON(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			held, _ = ledger.Spent("mock-model")
+			full(w, r)
+		}), cfgJSON)
+		ledger = l
+		drain(post(t, px, usStream))
+		same(t, held, 0.019800)
+	})
+	for _, body := range []string{
+		`{"model":"mock-model","stream":true,"max_tokens":100000,"messages":[]}`,
+		`{"model":"mock-model","stream":true,"inference_geo":"global","max_tokens":100000,"messages":[]}`,
+	} {
+		t.Run("control: standard price for "+body[strings.Index(body, `"stream"`):strings.Index(body, `"max_tokens"`)], func(t *testing.T) {
+			px, ledger := startProxyJSON(t, http.HandlerFunc(full), cfgJSON)
+			drain(post(t, px, body))
+			got, _ := ledger.Committed("mock-model")
+			same(t, got, 0.032)
+		})
+	}
+	t.Run("a geo with no known multiplier is refused", func(t *testing.T) {
+		called := false
+		px, ledger := startProxyJSON(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			called = true
+			full(w, r)
+		}), cfgJSON)
+		resp := post(t, px, `{"model":"mock-model","stream":true,"inference_geo":"eu","max_tokens":100000,"messages":[]}`)
+		b, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusBadRequest || !strings.Contains(string(b), "caudao_unpriced_geo") || called {
+			t.Errorf("got %d %s (upstream called: %v), want 400 caudao_unpriced_geo before upstream", resp.StatusCode, b, called)
+		}
+		if got, _ := ledger.Spent("mock-model"); got != 0 {
+			t.Errorf("a refused request spent $%.6f", got)
+		}
+	})
+}

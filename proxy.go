@@ -18,7 +18,7 @@ const metaKey ctxKey = 0
 
 type reqMeta struct {
 	model   string
-	price   Price  // resolved once, for the model and the requested speed
+	price   Price  // resolved once, for the model, speed and inference_geo
 	release func() // frees this request's budget reservation
 }
 
@@ -86,6 +86,7 @@ func (p *Proxy) meteredMessages(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Model string `json:"model"`
 		Speed string `json:"speed"`
+		Geo   string `json:"inference_geo"`
 	}
 	if err := json.Unmarshal(body, &req); err != nil || req.Model == "" {
 		refuse(w, http.StatusBadRequest, "caudao_bad_request", "caudao: request has no model field")
@@ -103,6 +104,12 @@ func (p *Proxy) meteredMessages(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		refuse(w, http.StatusBadRequest, "caudao_unpriced_speed",
 			fmt.Sprintf("caudao: model %q has no fast price (fail-closed); add \"fast\" to its prices entry", req.Model))
+		return
+	}
+	// Geo stacks on fast, so it is applied to the price ForSpeed resolved.
+	if price, ok = price.ForGeo(req.Geo); !ok {
+		refuse(w, http.StatusBadRequest, "caudao_unpriced_geo",
+			fmt.Sprintf("caudao: inference_geo %q has no known price (fail-closed)", req.Geo))
 		return
 	}
 	if trip, reason := p.overBudget(req.Model); trip {

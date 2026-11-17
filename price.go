@@ -60,6 +60,32 @@ func (p Price) ForSpeed(speed string) (Price, bool) {
 	return f, true
 }
 
+// usInferenceMult is what "inference_geo": "us" costs: 1.1x on every token
+// category (input, output, cache writes and reads), long-prompt tier included,
+// on top of fast mode. The web search fee is not a token price.
+const usInferenceMult = 1.1
+
+// ForGeo returns the price of a request sent with the given inference_geo, and
+// false for a geo caudao has no multiplier for. Apply it after ForSpeed.
+func (p Price) ForGeo(geo string) (Price, bool) {
+	switch geo {
+	case "", "global":
+		return p, true
+	case "us":
+	default:
+		return Price{}, false
+	}
+	p.InputPerMTok *= usInferenceMult
+	p.OutputPerMTok *= usInferenceMult
+	if p.LongPrompt != nil {
+		l := *p.LongPrompt
+		l.InputPerMTok *= usInferenceMult
+		l.OutputPerMTok *= usInferenceMult
+		p.LongPrompt = &l
+	}
+	return p, true
+}
+
 // at returns the price that applies to a request whose usage so far is u.
 func (p Price) at(u Usage) Price {
 	if p.LongPrompt == nil || u.InputTokens+u.CacheCreationTokens+u.CacheReadTokens <= p.LongPromptOverTokens {
