@@ -112,4 +112,19 @@ func TestExampleConfigIsValid(t *testing.T) {
 	if p, _ := c.Prices.Lookup("claude-haiku-5-5"); p.LongPrompt == nil {
 		t.Fatal("the example has no long-prompt tier for claude-haiku-5-5")
 	}
+	// Published rates (pricing page, 2026-11-18): a broad prefix must not
+	// under-price an older, dearer model it still matches.
+	for model, want := range map[string][2]float64{
+		"claude-opus-4-1": {15, 75}, "claude-opus-4-8": {5, 25}, "claude-opus-5-5": {4, 20},
+		"claude-sonnet-4-6": {3, 15}, "claude-sonnet-5": {2, 10}, "claude-sonnet-5-5": {2, 10},
+		"claude-haiku-4-5": {1, 5}, "claude-haiku-5-5": {0.1, 0.5},
+	} {
+		p, _ := c.Prices.Lookup(model)
+		if p.InputPerMTok < want[0] || p.OutputPerMTok < want[1] {
+			t.Errorf("%s priced %g / %g, below the published %g / %g", model, p.InputPerMTok, p.OutputPerMTok, want[0], want[1])
+		}
+	}
+	if p, _ := c.Prices.Lookup("claude-opus-5-5"); p.Fast == nil || p.Fast.InputPerMTok < 8 || p.Fast.OutputPerMTok < 40 {
+		t.Error("the example under-prices Opus 5.5 fast mode ($8 / $40)")
+	}
 }

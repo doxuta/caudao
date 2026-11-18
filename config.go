@@ -143,7 +143,12 @@ const ExampleConfig = `{
       "input_per_mtok": 15.0, "output_per_mtok": 75.0,
       "fast": { "input_per_mtok": 15.0, "output_per_mtok": 75.0 }
     },
+    "claude-opus-5-5": {
+      "input_per_mtok": 4.0, "output_per_mtok": 20.0, "cache_read_mult": 0.05,
+      "fast": { "input_per_mtok": 8.0, "output_per_mtok": 40.0 }
+    },
     "claude-sonnet": { "input_per_mtok": 3.0, "output_per_mtok": 15.0 },
+    "claude-sonnet-5": { "input_per_mtok": 2.0, "output_per_mtok": 10.0 },
     "claude-haiku": { "input_per_mtok": 1.0, "output_per_mtok": 5.0 },
     "claude-haiku-5-5": {
       "input_per_mtok": 0.10, "output_per_mtok": 0.50,

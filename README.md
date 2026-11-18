@@ -82,10 +82,17 @@ suspicious of unknown models is caudao's):
   "daily_per_model_usd": { "claude-opus": 15.0 },
   "prices": {
     "claude-opus":  { "input_per_mtok": 15.0, "output_per_mtok": 75.0 },
+    "claude-opus-5-5": { "input_per_mtok": 4.0, "output_per_mtok": 20.0 },
     "claude-sonnet": { "input_per_mtok": 3.0, "output_per_mtok": 15.0 }
   }
 }
 ```
+
+A broad prefix prices every model it matches, so keep it at the highest of their
+rates: `claude-opus` covers Claude Opus 4.1 at $15 / $75, still served on some
+cloud platforms. Give the models you run their own narrower entry (Claude Opus 5.5
+at $4 / $20, pricing page fetched 2026-11-18). `caudao init` writes that shape for
+Opus 5.5, Sonnet 5 and 5.5, and Haiku 5.5.
 
 `daily_per_model_usd` keys are model-name prefixes, and each prefix is one
 shared ceiling: with `"claude-opus": 15.0`, `claude-opus-4-1` and
