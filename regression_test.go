@@ -1160,3 +1160,138 @@ func TestUSInferenceIsCharged(t *testing.T) {
 		}
 	})
 }
+
+// A 1-hour cache write costs 2x the input price, not the 5-minute 1.25x
+// (prompt caching docs, "Cache write tokens with a 1-hour TTL are 2 times the
+// base input tokens price"). The reply says how many writes were 1-hour in
+// usage.cache_creation; cache_creation_input_tokens is the sum of both.
+func TestOneHourCacheWritesAreCharged(t *testing.T) {
+	const cfgJSON = `{"daily_total_usd": 100, "prices": {
+		"mock-model": {"input_per_mtok": 4, "output_per_mtok": 20,
+			"fast": {"input_per_mtok": 8, "output_per_mtok": 40}},
+		"mock-override": {"input_per_mtok": 4, "output_per_mtok": 20, "cache_write_1h_mult": 3,
+			"fast": {"input_per_mtok": 8, "output_per_mtok": 40}},
+		"mock-haiku-override": {"input_per_mtok": 0.1, "output_per_mtok": 0.5, "cache_write_1h_mult": 3,
+			"long_prompt_over_tokens": 100000, "long_prompt": {"input_per_mtok": 0.5, "output_per_mtok": 2.5}},
+		"mock-haiku": {"input_per_mtok": 0.1, "output_per_mtok": 0.5, "long_prompt_over_tokens": 100000,
+			"long_prompt": {"input_per_mtok": 0.5, "output_per_mtok": 2.5}}}}`
+	jsonReply := func(usage string) http.HandlerFunc {
+		return func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			io.WriteString(w, `{"id":"msg_1","usage":`+usage+`}`)
+		}
+	}
+	stream := func(start, delta string) http.HandlerFunc {
+		return func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "text/event-stream")
+			fmt.Fprintf(w, "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":%s}}\n\n", start)
+			fmt.Fprintf(w, "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":%s}\n\n", delta)
+			fmt.Fprint(w, "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
+		}
+	}
+	post := func(t *testing.T, px *httptest.Server, body string) {
+		t.Helper()
+		resp, err := http.Post(px.URL+"/v1/messages", "application/json", strings.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		drain(resp)
+	}
+	same := func(t *testing.T, got, want float64) {
+		t.Helper()
+		if fmt.Sprintf("%.6f", got) != fmt.Sprintf("%.6f", want) {
+			t.Errorf("ledger holds $%.6f, want $%.6f", got, want)
+		}
+	}
+	const all1h = `{"input_tokens":0,"cache_creation_input_tokens":10000,"cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":10000},"output_tokens":0}`
+	const body = `{"model":"mock-model","messages":[]}`
+	const streamBody = `{"model":"mock-model","stream":true,"max_tokens":100000,"messages":[]}`
+	// 3,000 input at $4 + 10,000 1-hour writes at 2 x $4 + 800 output at $20
+	// = 0.012 + 0.08 + 0.016.
+	const streamed = 0.108
+
+	t.Run("non-streaming", func(t *testing.T) {
+		// 10,000 x 2 x $4 / 1M.
+		px, ledger := startProxyJSON(t, jsonReply(all1h), cfgJSON)
+		post(t, px, body)
+		got, _ := ledger.Spent("mock-model")
+		same(t, got, 0.08)
+	})
+	t.Run("5-minute and 1-hour writes in one reply", func(t *testing.T) {
+		// 6,000 x 1.25 x $4 + 4,000 x 2 x $4 = 0.03 + 0.032.
+		px, ledger := startProxyJSON(t, jsonReply(`{"input_tokens":0,"cache_creation_input_tokens":10000,"cache_creation":{"ephemeral_5m_input_tokens":6000,"ephemeral_1h_input_tokens":4000},"output_tokens":0}`), cfgJSON)
+		post(t, px, body)
+		got, _ := ledger.Spent("mock-model")
+		same(t, got, 0.062)
+	})
+	t.Run("streaming, breakdown in message_start and repeated in message_delta", func(t *testing.T) {
+		px, ledger := startProxyJSON(t, stream(
+			`{"input_tokens":3000,"cache_creation_input_tokens":10000,"cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":10000},"output_tokens":1}`,
+			`{"input_tokens":3000,"cache_creation_input_tokens":10000,"cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":10000},"output_tokens":800}`,
+		), cfgJSON)
+		post(t, px, streamBody)
+		got, _ := ledger.Committed("mock-model")
+		same(t, got, streamed)
+	})
+	t.Run("streaming, breakdown only in message_delta", func(t *testing.T) {
+		px, ledger := startProxyJSON(t, stream(
+			`{"input_tokens":3000,"cache_creation_input_tokens":10000,"output_tokens":1}`,
+			`{"cache_creation_input_tokens":10000,"cache_creation":{"ephemeral_1h_input_tokens":10000},"output_tokens":800}`,
+		), cfgJSON)
+		post(t, px, streamBody)
+		got, _ := ledger.Committed("mock-model")
+		same(t, got, streamed)
+	})
+	t.Run("fast mode", func(t *testing.T) {
+		// 3,000 x $8 + 10,000 x 2 x $8 + 800 x $40 = 0.024 + 0.16 + 0.032.
+		px, ledger := startProxyJSON(t, stream(
+			`{"input_tokens":3000,"cache_creation_input_tokens":10000,"cache_creation":{"ephemeral_1h_input_tokens":10000},"output_tokens":1}`,
+			`{"output_tokens":800}`,
+		), cfgJSON)
+		post(t, px, `{"model":"mock-model","stream":true,"speed":"fast","max_tokens":100000,"messages":[]}`)
+		got, _ := ledger.Committed("mock-model")
+		same(t, got, 0.216)
+	})
+	t.Run("US-only inference", func(t *testing.T) {
+		// 10,000 x 2 x $4.40.
+		px, ledger := startProxyJSON(t, jsonReply(all1h), cfgJSON)
+		post(t, px, `{"model":"mock-model","inference_geo":"us","messages":[]}`)
+		got, _ := ledger.Spent("mock-model")
+		same(t, got, 0.088)
+	})
+	t.Run("long-prompt tier", func(t *testing.T) {
+		// 110,000-token prompt: 100,000 x $0.50 + 10,000 x 2 x $0.50 + 1,000 x
+		// $2.50 = 0.05 + 0.01 + 0.0025.
+		px, ledger := startProxyJSON(t, jsonReply(`{"input_tokens":100000,"cache_creation_input_tokens":10000,"cache_creation":{"ephemeral_1h_input_tokens":10000},"output_tokens":1000}`), cfgJSON)
+		post(t, px, `{"model":"mock-haiku","messages":[]}`)
+		got, _ := ledger.Spent("mock-haiku")
+		same(t, got, 0.0625)
+	})
+	t.Run("cache_write_1h_mult overrides 2x", func(t *testing.T) {
+		// 10,000 x 3 x $4.
+		px, ledger := startProxyJSON(t, jsonReply(all1h), cfgJSON)
+		post(t, px, `{"model":"mock-override","messages":[]}`)
+		got, _ := ledger.Spent("mock-override")
+		same(t, got, 0.12)
+	})
+	t.Run("the override carries to the fast tier", func(t *testing.T) {
+		// 10,000 x 3 x $8.
+		px, ledger := startProxyJSON(t, jsonReply(all1h), cfgJSON)
+		post(t, px, `{"model":"mock-override","speed":"fast","messages":[]}`)
+		got, _ := ledger.Spent("mock-override")
+		same(t, got, 0.24)
+	})
+	t.Run("the override carries to the long-prompt tier", func(t *testing.T) {
+		// 100,000 x $0.50 + 10,000 x 3 x $0.50 = 0.05 + 0.015.
+		px, ledger := startProxyJSON(t, jsonReply(`{"input_tokens":100000,"cache_creation_input_tokens":10000,"cache_creation":{"ephemeral_1h_input_tokens":10000},"output_tokens":0}`), cfgJSON)
+		post(t, px, `{"model":"mock-haiku-override","messages":[]}`)
+		got, _ := ledger.Spent("mock-haiku-override")
+		same(t, got, 0.065)
+	})
+	t.Run("control: no breakdown stays at 1.25x", func(t *testing.T) {
+		px, ledger := startProxyJSON(t, jsonReply(`{"input_tokens":0,"cache_creation_input_tokens":10000,"output_tokens":0}`), cfgJSON)
+		post(t, px, body)
+		got, _ := ledger.Spent("mock-model")
+		same(t, got, 0.05)
+	})
+}

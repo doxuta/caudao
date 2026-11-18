@@ -93,9 +93,10 @@ shared ceiling: with `"claude-opus": 15.0`, `claude-opus-4-1` and
 prefix owns a model, so a narrower entry such as `"claude-opus-5": 5.0` is its
 own pool. Models matching no prefix are held only by `daily_total_usd`.
 
-Cache tokens are billed too (1.25× input for cache writes, 0.1× for reads,
-both overridable per model), and so is each web search ($10 per 1,000,
-`web_search_per_1k` per model).
+Cache tokens are billed too (1.25× input for 5-minute cache writes, 2× for
+1-hour writes, 0.1× for reads; `cache_write_mult`, `cache_write_1h_mult` and
+`cache_read_mult` override them per model), and so is each web search ($10 per
+1,000, `web_search_per_1k` per model).
 
 A model priced by prompt length gets a second tier. Claude Haiku 5.5 bills every
 token of a request whose prompt (input + cache writes + cache reads) is over
@@ -231,6 +232,25 @@ the unmeterable-reply estimate and the in-flight reservation (each short by 10% 
 v0.3.4), that the search fee stays $10 per 1,000, and that an unknown geo is refused
 before upstream. The multiplier is the published one, not a measured bill.
 
+**1-hour cache writes were charged at the 5-minute rate.** A cache write with a
+1-hour TTL costs 2x the input price, a 5-minute one 1.25x (prompt caching page,
+fetched 2026-11-18); the reply counts the 1-hour part in
+`usage.cache_creation.ephemeral_1h_input_tokens`, inside
+`cache_creation_input_tokens`. Until v0.3.6 caudao read only the total, so every
+1-hour write was charged 37.5% short. 10,000 1-hour writes at Opus 5.5's rate:
+$0.050 instead of $0.080; a streamed reply of 3,000 input, those writes and 800
+output tokens: $0.078 instead of $0.108. Claude Code can ask for the 1-hour cache
+(`ENABLE_PROMPT_CACHING_1H` since 2.1.108, `promptCacheTtl` since 2.1.243), and its
+own CHANGELOG for 2.1.286 fixes the same miss in the Claude apps gateway's spend
+meter. The 1-hour writes are charged as an extra 0.75x on top of the total, so the
+bill is the same whichever stream event carries the split.
+`TestOneHourCacheWritesAreCharged` checks hand-computed dollar values for a
+non-streaming reply, mixed 5-minute and 1-hour writes, the split in `message_start`
+and only in `message_delta`, fast mode, US-only inference, the long-prompt tier and
+the `cache_write_1h_mult` override on both tiers; each of the first eight was short
+on v0.3.5. No live call: the multiplier is the published one, and where the split
+sits in a real stream was not captured.
+
 **At the cap the agent stops, and is told why.** Until v0.3.0 a budget refusal was a
 429. The breaker stays open until midnight, so every retry was wasted. Measured
 2026-11-06, Claude Code 2.1.312 and `anthropic` 2.6.0 for Python, against a local
@@ -279,6 +299,9 @@ retries after its cut. The TypeScript and Go SDKs have the same retry rule (408,
   global rate; so does a Microsoft Foundry deployment of the US Data Zone Standard
   type, which sends no `inference_geo`. Raise those prices by 10% in the table
   (a request that also says `"us"` is then charged 1.21x, on the safe side).
+- **A reply without the `cache_creation` split is charged at the 5-minute rate.**
+  If you only ever write the 1-hour cache and your replies leave the split out,
+  set `cache_write_mult` to 2.
 - **The search fee also lands at the end.** Like the extra input, it trips the
   next request, not the reply that ran the search.
 - **Code execution is not metered.** It is billed by container hours (1,550 free

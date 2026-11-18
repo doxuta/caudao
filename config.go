@@ -65,14 +65,14 @@ func (c *Config) Validate() error {
 				"(input %g, output %g) — a $0 price can never trip the breaker (fail-closed)",
 				prefix, p.InputPerMTok, p.OutputPerMTok)
 		}
-		if p.CacheWriteMult < 0 || p.CacheReadMult < 0 || p.WebSearchPer1K < 0 {
+		if p.CacheWriteMult < 0 || p.CacheWrite1hMult < 0 || p.CacheReadMult < 0 || p.WebSearchPer1K < 0 {
 			return fmt.Errorf("caudao: price entry %q has a negative cache multiplier or web search fee (fail-closed)", prefix)
 		}
 		if f := p.Fast; f != nil {
 			// Fast mode costs more, never less, and a tier has no tiers.
 			if f.Fast != nil || f.LongPrompt != nil ||
 				f.InputPerMTok < p.InputPerMTok || f.OutputPerMTok < p.OutputPerMTok ||
-				f.CacheWriteMult < 0 || f.CacheReadMult < 0 || f.WebSearchPer1K < 0 {
+				f.CacheWriteMult < 0 || f.CacheWrite1hMult < 0 || f.CacheReadMult < 0 || f.WebSearchPer1K < 0 {
 				return fmt.Errorf("caudao: price entry %q has a bad fast price: it needs rates no lower than "+
 					"the base price and no tier of its own (fail-closed)", prefix)
 			}
@@ -82,7 +82,7 @@ func (c *Config) Validate() error {
 			// the bigger request: a cheaper tier is a typo, not a price.
 			if p.LongPromptOverTokens <= 0 || l.LongPrompt != nil || l.Fast != nil ||
 				l.InputPerMTok < p.InputPerMTok || l.OutputPerMTok < p.OutputPerMTok ||
-				l.CacheWriteMult < 0 || l.CacheReadMult < 0 || l.WebSearchPer1K < 0 {
+				l.CacheWriteMult < 0 || l.CacheWrite1hMult < 0 || l.CacheReadMult < 0 || l.WebSearchPer1K < 0 {
 				return fmt.Errorf("caudao: price entry %q has a bad long_prompt: it needs long_prompt_over_tokens > 0 "+
 					"and rates no lower than the base price (fail-closed)", prefix)
 			}

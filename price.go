@@ -21,6 +21,10 @@ type Price struct {
 	// conventional 1.25× for cache writes and 0.1× for cache reads.
 	CacheWriteMult float64 `json:"cache_write_mult,omitempty"`
 	CacheReadMult  float64 `json:"cache_read_mult,omitempty"`
+	// CacheWrite1hMult prices 1-hour cache writes, which the reply counts in
+	// usage.cache_creation.ephemeral_1h_input_tokens. Zero falls back to the
+	// documented 2×.
+	CacheWrite1hMult float64 `json:"cache_write_1h_mult,omitempty"`
 	// WebSearchPer1K is the USD fee per 1,000 web searches, billed on top of
 	// tokens. Zero falls back to the documented $10.
 	WebSearchPer1K float64 `json:"web_search_per_1k,omitempty"`
@@ -53,6 +57,9 @@ func (p Price) ForSpeed(speed string) (Price, bool) {
 	}
 	if f.CacheReadMult == 0 {
 		f.CacheReadMult = p.CacheReadMult
+	}
+	if f.CacheWrite1hMult == 0 {
+		f.CacheWrite1hMult = p.CacheWrite1hMult
 	}
 	if f.WebSearchPer1K == 0 {
 		f.WebSearchPer1K = p.WebSearchPer1K
@@ -98,6 +105,9 @@ func (p Price) at(u Usage) Price {
 	if l.CacheReadMult == 0 {
 		l.CacheReadMult = p.CacheReadMult
 	}
+	if l.CacheWrite1hMult == 0 {
+		l.CacheWrite1hMult = p.CacheWrite1hMult
+	}
 	if l.WebSearchPer1K == 0 {
 		l.WebSearchPer1K = p.WebSearchPer1K
 	}
@@ -118,6 +128,13 @@ func (p Price) cacheWrite() float64 {
 	return 1.25
 }
 
+func (p Price) cacheWrite1h() float64 {
+	if p.CacheWrite1hMult > 0 {
+		return p.CacheWrite1hMult
+	}
+	return 2
+}
+
 func (p Price) cacheRead() float64 {
 	if p.CacheReadMult > 0 {
 		return p.CacheReadMult
@@ -131,6 +148,9 @@ type Usage struct {
 	OutputTokens        int `json:"output_tokens"`
 	CacheCreationTokens int `json:"cache_creation_input_tokens"`
 	CacheReadTokens     int `json:"cache_read_input_tokens"`
+	// CacheCreation splits CacheCreationTokens by TTL; only the 1-hour part
+	// is priced differently.
+	CacheCreation CacheCreation `json:"cache_creation"`
 	// ServerToolUse counts server-tool calls. Only web search carries a fee;
 	// web fetch is free and code execution is billed by container time, which
 	// the usage object does not report.
@@ -143,10 +163,18 @@ func (u Usage) plus(v Usage) Usage {
 		OutputTokens:        u.OutputTokens + v.OutputTokens,
 		CacheCreationTokens: u.CacheCreationTokens + v.CacheCreationTokens,
 		CacheReadTokens:     u.CacheReadTokens + v.CacheReadTokens,
+		CacheCreation: CacheCreation{
+			OneHourTokens: u.CacheCreation.OneHourTokens + v.CacheCreation.OneHourTokens,
+		},
 		ServerToolUse: ServerToolUse{
 			WebSearchRequests: u.ServerToolUse.WebSearchRequests + v.ServerToolUse.WebSearchRequests,
 		},
 	}
+}
+
+// CacheCreation is usage.cache_creation. A plain struct keeps Usage comparable.
+type CacheCreation struct {
+	OneHourTokens int `json:"ephemeral_1h_input_tokens"`
 }
 
 // ServerToolUse is usage.server_tool_use. A plain struct keeps Usage comparable.
@@ -177,6 +205,9 @@ func (p Price) rate(u Usage) float64 {
 	return float64(u.InputTokens)*in +
 		float64(u.OutputTokens)*out +
 		float64(u.CacheCreationTokens)*in*p.cacheWrite() +
+		// 1-hour writes are inside CacheCreationTokens, so they add only the
+		// difference: correct whichever event reports the split.
+		float64(u.CacheCreation.OneHourTokens)*in*max(p.cacheWrite1h()-p.cacheWrite(), 0) +
 		float64(u.CacheReadTokens)*in*p.cacheRead() +
 		float64(u.ServerToolUse.WebSearchRequests)*p.webSearch()
 }
