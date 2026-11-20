@@ -70,7 +70,9 @@ committed spend and by what other requests are holding.
 
 A mutex-guarded in-memory day record persisted with write-to-temp + atomic
 rename on every update. A crash loses at most the in-flight update; a restart
-cannot forget that the day's budget is spent. SQLite would be more general
+cannot forget that the day's budget is spent. A relative path belongs to the
+config file's directory: resolved against the working directory, a restart
+from elsewhere opened an empty ledger. SQLite would be more general
 and was rejected: one process, one small JSON object, zero dependencies.
 
 Day rollover uses local time deliberately — "my agent's daily budget" means

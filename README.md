@@ -50,7 +50,9 @@ and enforces the budget on the live token stream:
   the stream.
 - **Durable ledger** — daily spend survives restarts (atomic JSON writes); a
   tripped breaker stays open until local midnight, and the day only ever rolls
-  FORWARD, so a backwards clock step cannot refill the budget.
+  FORWARD, so a backwards clock step cannot refill the budget. A relative
+  `ledger_path` is read from the config file's directory, never from wherever
+  `serve` was started, and the startup line prints the path.
 - **Reserved, not raced** — each in-flight request holds a small reservation
   against its budget, so concurrent streams cannot all pass the same check and
   spend the same headroom (before this, 24 concurrent streams overshot a $0.10
@@ -257,6 +259,21 @@ and only in `message_delta`, fast mode, US-only inference, the long-prompt tier 
 the `cache_write_1h_mult` override on both tiers; each of the first eight was short
 on v0.3.5. No live call: the multiplier is the published one, and where the split
 sits in a real stream was not captured.
+
+**A restart from another directory refilled the budget.** `caudao init` writes
+`"ledger_path": "caudao-ledger.json"`, and until v0.4.0 that path was read from the
+working directory, not the config's. The same command, `caudao serve -config
+A/caudao.json`, against `caudao mock` with a $5 cap: started from directory B, one
+request spent $5.067 and tripped the breaker; restarted from directory C, v0.3.6
+reported `"total_usd":0` and answered the next request 200, with the spend left in
+`B/caudao-ledger.json`. v0.4.0 reports $5.067 after the restart and answers 402, the
+ledger in `A/`. `TestLedgerFollowsTheConfigNotTheWorkingDirectory` spends, restarts
+from another directory and reads the ledger back, for a bare file name, a
+subdirectory and no `ledger_path` at all (each $0 on v0.3.6), with an absolute path
+and a run inside the config's directory as controls. **Upgrading:** if you started
+`serve` from a directory other than the config's, move that directory's
+`caudao-ledger.json` next to `caudao.json` before you restart, or today's spend is
+forgotten once.
 
 **At the cap the agent stops, and is told why.** Until v0.3.0 a budget refusal was a
 429. The breaker stays open until midnight, so every retry was wasted. Measured

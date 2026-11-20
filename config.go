@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"path/filepath"
 )
 
 // Config is caudao's whole configuration. Budgets are hard daily ceilings in
@@ -21,7 +22,10 @@ type Config struct {
 	// Prices per model prefix. A request whose model matches no prefix is
 	// refused. Prices change — keep this table yours, not ours.
 	Prices PriceTable `json:"prices"`
-	// LedgerPath is where daily spend is persisted.
+	// LedgerPath is where daily spend is persisted. LoadConfig resolves a
+	// relative path against the config file's directory and defaults an empty
+	// one to caudao-ledger.json there; an empty path on a Config built in code
+	// means an in-memory ledger.
 	LedgerPath string `json:"ledger_path,omitempty"`
 }
 
@@ -37,6 +41,15 @@ func LoadConfig(path string) (*Config, error) {
 	}
 	if err := c.Validate(); err != nil {
 		return nil, err
+	}
+	// The ledger belongs to the config, not to wherever serve was started:
+	// resolved against the working directory, a restart from another
+	// directory opened a fresh ledger and refilled the day's budget.
+	if c.LedgerPath == "" {
+		c.LedgerPath = "caudao-ledger.json"
+	}
+	if !filepath.IsAbs(c.LedgerPath) {
+		c.LedgerPath = filepath.Join(filepath.Dir(path), c.LedgerPath)
 	}
 	return &c, nil
 }

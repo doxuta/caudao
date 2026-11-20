@@ -43,15 +43,11 @@ func main() {
 		fs.Parse(os.Args[2:])
 		cfg, err := caudao.LoadConfig(*cfgPath)
 		die(err)
-		ledgerPath := cfg.LedgerPath
-		if ledgerPath == "" {
-			ledgerPath = "caudao-ledger.json"
-		}
-		ledger, err := caudao.OpenLedger(ledgerPath)
+		ledger, err := caudao.OpenLedger(cfg.LedgerPath)
 		die(err)
 		p, err := caudao.NewProxy(cfg, ledger)
 		die(err)
-		fmt.Printf("caudao: metering %s on %s (daily cap $%.2f)\n", cfg.Upstream, *listen, cfg.DailyTotalUSD)
+		fmt.Printf("caudao: metering %s on %s (daily cap $%.2f, ledger %s)\n", cfg.Upstream, *listen, cfg.DailyTotalUSD, cfg.LedgerPath)
 		addr := *listen
 		if strings.HasPrefix(addr, ":") {
 			addr = "localhost" + addr
