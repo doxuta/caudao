@@ -2,6 +2,7 @@ package caudao
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
@@ -39,7 +40,8 @@ type ModelSpend struct {
 	USD          float64 `json:"usd"`
 }
 
-// OpenLedger loads (or initializes) the ledger at path.
+// OpenLedger loads (or initializes) the ledger at path and writes it back,
+// so it fails here, not mid-day, when path cannot be written.
 func OpenLedger(path string) (*Ledger, error) {
 	l := &Ledger{path: path, now: time.Now}
 	if b, err := os.ReadFile(path); err == nil {
@@ -53,6 +55,12 @@ func OpenLedger(path string) (*Ledger, error) {
 		l.data.Models = map[string]ModelSpend{}
 	}
 	l.reserved = map[string]float64{}
+	// Write once before serving, exactly as loaded (no rollover), so a ledger
+	// caudao cannot write stops the start instead of being discovered per
+	// request, enforced in memory only, and forgotten on the next restart.
+	if err := l.persist(); err != nil {
+		return nil, fmt.Errorf("ledger %s is not writable: %w", path, err)
+	}
 	return l, nil
 }
 

@@ -52,7 +52,10 @@ and enforces the budget on the live token stream:
   tripped breaker stays open until local midnight, and the day only ever rolls
   FORWARD, so a backwards clock step cannot refill the budget. A relative
   `ledger_path` is read from the config file's directory, never from wherever
-  `serve` was started, and the startup line prints the path.
+  `serve` was started, and the startup line prints the path. A ledger caudao
+  cannot write stops `serve` before it listens; a write that fails later (disk
+  full) is logged and enforced in memory, and a restart then loses the spend
+  since the last good write.
 - **Reserved, not raced** — each in-flight request holds a small reservation
   against its budget, so concurrent streams cannot all pass the same check and
   spend the same headroom (before this, 24 concurrent streams overshot a $0.10
@@ -274,6 +277,19 @@ and a run inside the config's directory as controls. **Upgrading:** if you start
 `serve` from a directory other than the config's, move that directory's
 `caudao-ledger.json` next to `caudao.json` before you restart, or today's spend is
 forgotten once.
+
+**A ledger it could not write was enforced in memory and forgotten on restart.**
+Until v0.5.0 `serve` started with `ledger_path` in a read-only directory, logged
+`ledger persist failed (still enforcing in memory)` on every request, and the next
+restart began the day at $0. Against `caudao mock`, $5 cap, ledger directory
+`chmod 555`: v0.4.0 answered 200, reported `"total_usd":1.01602`, and after a
+restart `"total_usd":0`. v0.5.0 exits 1 before listening with `ledger
+ro/caudao-ledger.json is not writable: ... permission denied`; with the directory
+writable again the same request and restart keep $1.01602.
+`TestLedgerRefusesToOpenWhereItCannotWrite` opens a ledger in a read-only directory
+and in a subdirectory of one (both opened on v0.4.0), with a writable directory, a
+reopen that keeps the spend and the in-memory ledger as controls. **Upgrading:** if
+`serve` now exits with `is not writable`, give it a directory it can write.
 
 **At the cap the agent stops, and is told why.** Until v0.3.0 a budget refusal was a
 429. The breaker stays open until midnight, so every retry was wasted. Measured
