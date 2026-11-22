@@ -47,13 +47,17 @@ func main() {
 		die(err)
 		p, err := caudao.NewProxy(cfg, ledger)
 		die(err)
+		// Listen before announcing, so a busy port never prints the address
+		// to use.
+		ln, err := net.Listen("tcp", *listen)
+		die(err)
 		fmt.Printf("caudao: metering %s on %s (daily cap $%.2f, ledger %s)\n", cfg.Upstream, *listen, cfg.DailyTotalUSD, cfg.LedgerPath)
 		addr := *listen
 		if strings.HasPrefix(addr, ":") {
 			addr = "localhost" + addr
 		}
 		fmt.Printf("caudao: point your agent at it: ANTHROPIC_BASE_URL=http://%s\n", addr)
-		die(http.ListenAndServe(*listen, p))
+		die(http.Serve(ln, p))
 	case "mock":
 		fs := flag.NewFlagSet("mock", flag.ExitOnError)
 		listen := fs.String("listen", ":9787", "listen address")
@@ -67,6 +71,11 @@ func main() {
 		resp, err := http.Get(*url + "/caudao/status")
 		die(err)
 		defer resp.Body.Close()
+		// caudao's own status always answers 200; anything else means the URL
+		// is not caudao, which must not read as a healthy breaker.
+		if resp.StatusCode != http.StatusOK {
+			die(fmt.Errorf("%s/caudao/status answered %s: is caudao running at this URL?", *url, resp.Status))
+		}
 		io.Copy(os.Stdout, resp.Body)
 	case "demo":
 		demo()

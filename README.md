@@ -291,6 +291,19 @@ and in a subdirectory of one (both opened on v0.4.0), with a writable directory,
 reopen that keeps the spend and the in-memory ledger as controls. **Upgrading:** if
 `serve` now exits with `is not writable`, give it a directory it can write.
 
+**`status` and `serve` told the operator the wrong thing on two startup mistakes.**
+Until v0.5.1 `caudao status -url` pointed at something that is not caudao (the
+upstream API, another server on the port) printed that server's error body and
+exited 0, and `serve` on a busy port printed `metering ...` and `point your agent at
+it: ANTHROPIC_BASE_URL=...` before dying on `address already in use`. v0.5.1 exits 1
+with `.../caudao/status answered 404 ...: is caudao running at this URL?` (caudao's
+own status always answers 200), and listens before it announces, so a busy port
+prints only the bind error. `cmd/caudao/cli_test.go` runs the built binary and reads
+its exit code: a 404 and a 502 status target and a busy port (all three wrong on
+v0.5.0), with caudao's own status, a missing config, an unwritable ledger directory
+and `init` over an edited `caudao.json` as controls. These subprocess runs are not
+counted by `go test -coverprofile`.
+
 **At the cap the agent stops, and is told why.** Until v0.3.0 a budget refusal was a
 429. The breaker stays open until midnight, so every retry was wasted. Measured
 2026-11-06, Claude Code 2.1.312 and `anthropic` 2.6.0 for Python, against a local
