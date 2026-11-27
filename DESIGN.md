@@ -68,11 +68,19 @@ committed spend and by what other requests are holding.
 
 ## Ledger
 
-A mutex-guarded in-memory day record persisted with write-to-temp + atomic
-rename on every update. A crash loses at most the in-flight update; a restart
-cannot forget that the day's budget is spent. A relative path belongs to the
-config file's directory: resolved against the working directory, a restart
-from elsewhere opened an empty ledger. The ledger is written once when it is
+A mutex-guarded in-memory day record persisted on every update: write a temp
+file, fsync it, rename it over the ledger, fsync the directory. A crash of the
+process or of the OS loses at most the in-flight update, as far as the
+filesystem honours fsync; a restart cannot forget that the day's budget is
+spent. Before 2026-11-27 there was no fsync, so that held for a process crash
+only: after power loss the rename could land before the data and leave a
+zero-length ledger, which stops `serve` (fail-closed) instead of refilling the
+budget (an empty file is not JSON). The two fsyncs cost about 7 ms per update
+on an Apple-silicon Mac (`F_FULLFSYNC`), against about 0.2 ms without them,
+paid under the ledger lock. Power loss itself was not tested.
+
+A relative path belongs to the config file's directory: resolved against the
+working directory, a restart from elsewhere opened an empty ledger. The ledger is written once when it is
 opened, so an unwritable path stops the start rather than degrading to a
 budget that only lives in memory. SQLite would be more general
 and was rejected: one process, one small JSON object, zero dependencies.

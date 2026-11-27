@@ -10,8 +10,9 @@ import (
 )
 
 // Ledger is the persistent daily spend record. All methods are safe for
-// concurrent use; every mutation is flushed to disk with an atomic rename so
-// a crash cannot lose more than the in-flight update.
+// concurrent use; every mutation is fsynced to a temp file, renamed over the
+// ledger and the directory fsynced, so a crash, of the process or of the OS,
+// cannot lose more than the in-flight update.
 type Ledger struct {
 	mu   sync.Mutex
 	path string
@@ -184,9 +185,35 @@ func (l *Ledger) persist() error {
 	if err != nil {
 		return err
 	}
+	// Without the fsync an OS crash or power loss can make the rename durable
+	// before the data, leaving a zero-length ledger; the directory fsync makes
+	// the rename itself durable. On darwin File.Sync is F_FULLFSYNC.
 	tmp := l.path + ".tmp"
-	if err := os.WriteFile(tmp, b, 0o644); err != nil {
+	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
+	if err != nil {
 		return err
 	}
-	return os.Rename(tmp, l.path)
+	if _, err := f.Write(b); err != nil {
+		f.Close()
+		return err
+	}
+	if err := fsync(f); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, l.path); err != nil {
+		return err
+	}
+	d, err := os.Open(filepath.Dir(l.path))
+	if err != nil {
+		return err
+	}
+	defer d.Close()
+	return fsync(d)
 }
+
+// fsync is File.Sync, swappable in tests.
+var fsync = (*os.File).Sync

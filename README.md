@@ -48,7 +48,8 @@ and enforces the budget on the live token stream:
   refusal would let a retrying agent loop forever with the ledger at zero.
   Upstream is asked for `Accept-Encoding: identity` so the meter can always see
   the stream.
-- **Durable ledger** — daily spend survives restarts (atomic JSON writes); a
+- **Durable ledger** — daily spend survives restarts (temp file fsynced, renamed
+  over the ledger, directory fsynced, so an OS crash should not leave it empty); a
   tripped breaker stays open until local midnight, and the day only ever rolls
   FORWARD, so a backwards clock step cannot refill the budget. A relative
   `ledger_path` is read from the config file's directory, never from wherever
@@ -335,6 +336,11 @@ retries after its cut. The TypeScript and Go SDKs have the same retry rule (408,
   Python SDK were measured. Anything else that retries every failure keeps hitting a
   402; each one is answered locally and spends nothing. Match on the error type
   `caudao_budget_exhausted`, not on the status.
+- **Every ledger update waits for the disk.** Two fsyncs per usage event, held
+  under the ledger lock: `BenchmarkLedgerAdd` measured about 7.4 ms per update on
+  an Apple-silicon Mac (macOS `F_FULLFSYNC`), about 0.2 ms with the fsyncs
+  stubbed out, so roughly 135 updates a second across all streams. The test pins
+  the call order, not what a given disk does with it; power loss was not tested.
 - **Server-tool input arrives at the end, so it cannot cut that reply.** It is
   charged then, and the next request is the one refused.
 - **The long-prompt tier after a server tool is a reading, not a measurement.**
